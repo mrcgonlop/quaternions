@@ -1,0 +1,1 @@
+// Standard dipole (validation benchmark)

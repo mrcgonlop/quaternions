@@ -1,0 +1,20 @@
+[package]
+name = "quaternions"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = "0.15"
+bevy_egui = "0.33"
+bytemuck = { version = "1.14", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+ron = "0.8"
+rayon = "1.8"
+
+[features]
+default = []
+hdf5-export = ["hdf5"]
+
+[dependencies.hdf5]
+version = "0.8"
+optional = true

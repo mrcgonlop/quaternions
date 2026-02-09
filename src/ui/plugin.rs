@@ -1,0 +1,1 @@
+// Bevy plugin: egui panels

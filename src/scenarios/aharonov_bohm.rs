@@ -1,0 +1,1 @@
+// Solenoid geometry, phase computation

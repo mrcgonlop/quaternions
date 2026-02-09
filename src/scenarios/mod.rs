@@ -1,0 +1,9 @@
+pub mod aharonov_bohm;
+pub mod casimir;
+pub mod graneau_wire;
+pub mod bifilar_coil;
+pub mod toroidal_ab;
+pub mod brown_capacitor;
+pub mod pulsed_circuit;
+pub mod charge_cluster;
+pub mod dipole_radiation;
