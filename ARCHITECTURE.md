@@ -406,11 +406,15 @@ The simulator supports multiple simultaneous visualization modes, toggled and co
 - Configurable color map and opacity transfer function
 - GPU ray-marching through 3D texture
 
-#### 2. Slice Planes
-- Orthogonal slice planes (XY, XZ, YZ) at adjustable positions
-- Color-mapped scalar field on each slice
-- Can display vector fields (E, B, Poynting) as overlaid arrows
-- Multiple slices can be active simultaneously
+#### 2. Slice Planes (Implemented)
+- Two simultaneous orthogonal slice planes (XY, XZ, YZ) at adjustable positions
+- Each slice has independent field quantity, color map, and range controls
+- Color-mapped scalar field on each slice, updated every frame
+- `SliceConfigs` resource holds `[SingleSliceConfig; 2]`, entities tagged with `SliceIndex(usize)`
+- Dynamic textures: each frame creates a new `Image` via `images.add()`, swaps the `StandardMaterial.base_color_texture` handle, and removes the old image. Neither `images.get_mut()` nor `images.insert()` reliably triggers Bevy 0.15 render asset re-extraction.
+- Auto-range: minimum range clamped to `1e-6` (must be > `f32::EPSILON`) to avoid `map_value` t=0.5 midpoint fallback
+- System ordering: visualization chain runs `.after(SimulationSet)` with `apply_deferred` between entity spawn and texture update
+- Can display vector fields (E, B, Poynting) as overlaid arrows (future)
 
 #### 3. Vector Field Glyphs
 - Arrows or cones showing field direction and magnitude at sampled points

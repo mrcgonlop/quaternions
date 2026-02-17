@@ -67,7 +67,7 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
 ### 0.3 — Vector field math utilities
 - **Context:** `ARCHITECTURE.md §Simulation Loop` (lines 219–266, for understanding what derivatives are needed), `src/math/quaternion.rs` (to understand existing math types)
 - **Depends on:** 0.1
-- `[ ]` Implement `src/math/vector_field.rs`:
+- `[x]` Implement `src/math/vector_field.rs`:
   - `Vec3f` type alias or wrapper (or just use `[f32; 3]` consistently)
   - Dot product, cross product, magnitude helpers
   - `gradient_scalar(grid, idx) -> Vec3f` — central difference gradient of a scalar field
@@ -75,12 +75,12 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
   - `curl_vector(grid, idx) -> Vec3f` — central difference curl
   - `laplacian_scalar(grid, idx) -> f32` — 7-point stencil Laplacian
   - `laplacian_vector(grid, idx) -> Vec3f` — component-wise Laplacian
-- `[ ]` Implement `src/math/fdtd.rs`:
+- `[x]` Implement `src/math/fdtd.rs`:
   - Grid indexing helpers: `idx(x, y, z, nx, ny) -> usize`
   - Neighbor index functions with boundary awareness
   - CFL condition calculator: `max_dt(dx, c_max) -> f32`
   - Stencil coefficient constants for 2nd-order and 4th-order finite differences
-- `[ ]` Unit tests:
+- `[x]` Unit tests:
   - Gradient of linear field = constant vector
   - Divergence of constant vector field = 0
   - Curl of gradient = 0 (to numerical precision)
@@ -90,12 +90,12 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
 ### 0.4 — Simulation grid resource and cell state
 - **Context:** `ARCHITECTURE.md §Data Model` (lines 72–130, CellState + DerivedFields structs), `ARCHITECTURE.md §Simulation Loop` (lines 219–266), `src/math/quaternion.rs`
 - **Depends on:** 0.2
-- `[ ]` Implement `src/simulation/state.rs`:
+- `[x]` Implement `src/simulation/state.rs`:
   - `CellState` struct matching ARCHITECTURE.md (48 bytes, repr(C), Pod, Zeroable)
   - `DerivedFields` struct for visualization quantities
   - `CellFlags` bitflags: `EMPTY`, `CONDUCTOR`, `DIELECTRIC`, `SOURCE`, `PML`, `BOUNDARY`
   - `SimParams` uniform struct for GPU: grid dimensions, dx, dt, c0, time, iteration count, `extended_mode: u32`
-- `[ ]` Implement `src/simulation/grid.rs`:
+- `[x]` Implement `src/simulation/grid.rs`:
   - `SimulationGrid` Bevy resource:
     - `nx, ny, nz: u32` — grid dimensions
     - `dx: f32` — cell spacing (uniform for now)
@@ -110,45 +110,45 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
   - `SimulationGrid::cell_mut(x, y, z) -> &mut CellState`
   - `SimulationGrid::is_interior(x, y, z) -> bool` — not on boundary
   - CFL-based dt calculation in constructor
-- `[ ]` Implement `src/simulation/plugin.rs`:
+- `[x]` Implement `src/simulation/plugin.rs`:
   - `SimulationPlugin` that inserts `SimulationGrid` as a resource
   - Registers a startup system that initializes the grid
   - Registers the simulation step system (stub: does nothing yet)
-  - `SimulationConfig` resource: grid size, dx, paused flag, steps_per_frame, `extended_mode: bool`
-- `[ ]` Wire into `main.rs`: `app.add_plugins(SimulationPlugin)`
-- `[ ]` Verify: app starts, grid is allocated, no panic
+  - `SimulationConfig` resource: grid size, dx, paused flag, steps_per_frame, `extended_mode: bool`, `dt_factor: f32` (0.01–1.0, scales dt below CFL max)
+- `[x]` Wire into `main.rs`: `app.add_plugins(SimulationPlugin)`
+- `[x]` Verify: app starts, grid is allocated, no panic
 - **Session output**: ECS-integrated simulation grid, ready for GPU upload
 
 ### 0.5 — Basic Bevy scene: camera, lighting, egui panel
 - **Context:** `src/main.rs`, `src/simulation/plugin.rs` (for `SimulationConfig` type), `ARCHITECTURE.md §Visualization Architecture` (lines 389–453, for UI layout overview)
 - **Depends on:** 0.4
-- `[ ]` Set up `main.rs` with:
+- `[x]` Set up `main.rs` with:
   - 3D camera with orbit controls (bevy's built-in or a simple custom orbit system)
   - Ambient + directional light
   - Ground plane or bounding box wireframe showing the simulation domain
   - Coordinate axes gizmo
-- `[ ]` Implement `src/ui/plugin.rs`:
+- `[x]` Implement `src/ui/plugin.rs`:
   - `UiPlugin` that adds bevy_egui
   - Basic egui side panel with:
     - Simulation controls: Play/Pause button, Step button, Reset button
     - Grid info display: dimensions, dx, dt, current time, iteration count
     - FPS counter
   - Wire `SimulationConfig.paused` to the Play/Pause button
-- `[ ]` Implement `src/ui/parameter_panel.rs` as stub:
+- `[x]` Implement `src/ui/parameter_panel.rs` as stub:
   - Empty panel skeleton with `// PSEUDOCODE:` for future parameter sliders
-- `[ ]` Verify: app shows 3D scene with bounding box, egui panel works, camera orbits
+- `[x]` Verify: app shows 3D scene with bounding box, egui panel works, camera orbits
 - **Session output**: Interactive 3D app shell ready for visualization layers
 
 ### 0.6 — Color map utilities
 - **Context:** `ARCHITECTURE.md §Visualization Modes` (lines 389–412, color map usage context), `src/visualization/mod.rs` (to see module structure)
 - **Depends on:** 0.1
-- `[ ]` Implement `src/visualization/color_maps.rs`:
+- `[x]` Implement `src/visualization/color_maps.rs`:
   - `ColorMap` enum: `Viridis`, `Plasma`, `Coolwarm`, `ScalarField` (blue-white-red), `Grayscale`
   - `fn map_value(value: f32, min: f32, max: f32, map: ColorMap) -> [f32; 4]` — returns RGBA
   - Hardcoded lookup tables (32 or 64 entries per map, linearly interpolated)
   - `ScalarField` map: negative=blue, zero=white/transparent, positive=red — critical for S field
   - Generate 1D texture from color map for GPU shader use
-- `[ ]` Visual test: render a colored quad showing the full color map gradient
+- `[x]` Visual test: render a colored quad showing the full color map gradient
 - **Session output**: Color mapping ready for all visualization modes
 
 ---
@@ -160,7 +160,7 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
 ### 1.1 — CPU field update: standard FDTD on quaternionic potentials
 - **Context:** `ARCHITECTURE.md §GPU Compute Shader: Field Update Kernel` (lines 268–385, the WGSL pseudocode — this IS the authoritative equation reference for the CPU implementation), `src/simulation/state.rs` (CellState layout), `src/simulation/grid.rs` (grid access API), `src/math/vector_field.rs` and `src/math/fdtd.rs` (spatial derivative helpers)
 - **Depends on:** 0.3, 0.4
-- `[ ]` Implement `src/simulation/field_update.rs`:
+- `[x]` Implement `src/simulation/field_update.rs`:
   - `fn step_field_cpu(grid: &mut SimulationGrid, params: &SimParams)`:
     - For each interior cell (x, y, z):
       - Read Q = (phi/c, Ax, Ay, Az) from cell
@@ -183,16 +183,16 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
     - Double-buffer: `SimulationGrid` holds `cells: [Vec<CellState>; 2]` + `current: usize`
       - Read from `cells[current]`, write to `cells[1 - current]`, swap `current`
   - `// PSEUDOCODE:` comments should include the full equations from ARCHITECTURE.md §2.1
-- `[ ]` Bevy system: `fn simulation_step_system(grid: ResMut<SimulationGrid>, config: Res<SimulationConfig>)`
+- `[x]` Bevy system: `fn simulation_step_system(grid: ResMut<SimulationGrid>, config: Res<SimulationConfig>)`
   - Skip if paused
   - Call `step_field_cpu` for `config.steps_per_frame` iterations
-- `[ ]` Verify: no crash, grid evolves (values change from initial conditions)
+- `[x]` Verify: no crash, grid evolves (values change from initial conditions)
 - **Session output**: Core physics loop running on CPU, toggleable standard/extended mode
 
 ### 1.2 — Source injection: oscillating dipole
 - **Context:** `src/simulation/grid.rs` (grid access API), `src/simulation/state.rs` (CellState), `src/simulation/plugin.rs` (system registration pattern), `src/ui/plugin.rs` (UI panel pattern)
 - **Depends on:** 1.1
-- `[ ]` Implement `src/simulation/sources.rs`:
+- `[x]` Implement `src/simulation/sources.rs`:
   - `SourceType` enum: `PointCharge`, `OscillatingDipole`, `CurrentPulse`, `Custom`
   - `Source` struct: position, type, amplitude, frequency, phase, active flag
   - `SourceConfig` resource: `Vec<Source>`
@@ -206,14 +206,14 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
       - `PointCharge`: set φ at source cell (static charge)
       - `CurrentPulse`: Gaussian or step function current injection
   - Bevy system that runs before `simulation_step_system`
-- `[ ]` Add to UI: source position, frequency, amplitude sliders
-- `[ ]` Verify: set up dipole, run sim, see Q values changing around source
+- `[x]` Add to UI: source position, frequency, amplitude sliders
+- `[x]` Verify: set up dipole, run sim, see Q values changing around source
 - **Session output**: Configurable EM sources driving the simulation
 
 ### 1.3 — Derived field computation
 - **Context:** `src/simulation/state.rs` (DerivedFields struct), `src/simulation/grid.rs`, `src/math/vector_field.rs` (gradient, curl, divergence helpers), `README.md §The Quaternionic Four-Potential` (for E, B, S derivation from Q — lines 23–70 only)
 - **Depends on:** 1.1, 0.3
-- `[ ]` Implement `src/simulation/diagnostics.rs` (derived fields portion):
+- `[x]` Implement `src/simulation/diagnostics.rs` (derived fields portion):
   - `fn compute_derived_fields(grid: &SimulationGrid) -> Vec<DerivedFields>`:
     - For each cell:
       - E = -grad(phi) - dA/dt = -c*grad(Q.w) - Q_dot.vector()
@@ -223,14 +223,14 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
       - poynting = (1/μ₀) * E × B
   - `fn total_energy(derived: &[DerivedFields], dx: f32) -> f64` — sum over all cells * dx³
   - `fn max_S(derived: &[DerivedFields]) -> f32` — peak scalar field magnitude
-- `[ ]` Add diagnostics to UI panel: total energy, max |E|, max |B|, max |S|, updated each frame
-- `[ ]` Verify: energy should be roughly conserved (not grow unboundedly) for a free dipole
+- `[x]` Add diagnostics to UI panel: total energy, max |E|, max |B|, max |S|, updated each frame
+- `[x]` Verify: energy should be roughly conserved (not grow unboundedly) for a free dipole
 - **Session output**: Real-time field diagnostics confirming simulation health
 
 ### 1.4 — Slice plane visualization
 - **Context:** `src/simulation/diagnostics.rs` (DerivedFields data to visualize), `src/visualization/color_maps.rs` (color mapping API), `src/simulation/grid.rs` (grid dimensions), `src/ui/plugin.rs` (UI integration pattern)
 - **Depends on:** 1.3, 0.6
-- `[ ]` Implement `src/visualization/slices.rs`:
+- `[x]` Implement `src/visualization/slices.rs`:
   - `SlicePlane` component: `axis: Axis` (X/Y/Z), `position: f32`, `field: FieldQuantity`, `color_map: ColorMap`
   - `FieldQuantity` enum: `E_magnitude`, `B_magnitude`, `S_field`, `Phi`, `Ax`, `Ay`, `Az`, `EnergyDensity`, `K_vacuum`
   - Bevy system: `fn update_slice_texture(grid, derived_fields, slice_planes)`:
@@ -243,19 +243,19 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
   - `// Map value through color_map with auto-ranging or fixed range → RGBA`
   - `// Write RGBA to texture at (x, y) pixel`
   - `// Bevy updates the texture on the quad mesh each frame`
-- `[ ]` Add to UI: slice axis selector, position slider, field quantity dropdown, color map dropdown
-- `[ ]` Verify: see a colored 2D slice through the 3D grid, updating in real time as simulation runs
+- `[x]` Add to UI: slice axis selector, position slider, field quantity dropdown, color map dropdown
+- `[x]` Verify: see a colored 2D slice through the 3D grid, updating in real time as simulation runs
 - **Session output**: First real visualization — watching EM fields propagate in a slice view
 
 ### 1.5 — Boundary conditions: simple absorbing
 - **Context:** `src/simulation/grid.rs` (grid access, boundary cell identification), `src/simulation/state.rs` (CellState, CellFlags), `src/simulation/plugin.rs` (system ordering)
 - **Depends on:** 1.1
-- `[ ]` Implement `src/simulation/boundaries.rs`:
+- `[x]` Implement `src/simulation/boundaries.rs`:
   - `BoundaryType` enum: `Absorbing`, `Conducting`, `Periodic`, `PML`
   - `BoundaryConfig` resource: boundary type for each face (±x, ±y, ±z)
   - `fn apply_boundaries(grid: &mut SimulationGrid, config: &BoundaryConfig)`:
     - `Absorbing` (simple first-order): multiply Q and Q_dot by a damping factor in boundary cells
-      - Damping increases toward the outer edge: `factor = 1 - ((distance_from_interior / pml_depth)²) * sigma_max * dt`
+      - Damping increases toward the outer edge: `factor = 1 - ((distance_from_interior / pml_depth)²) * sigma_max`
       - `// PSEUDOCODE: This is a simplified Mur-type absorbing boundary`
       - `// For proper PML, implement split-field perfectly matched layers (future task)`
       - `// The simple version just exponentially damps fields near boundaries`
@@ -263,13 +263,13 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
     - `Conducting`: set tangential A components to zero on boundary cells
     - `Periodic`: copy opposite face values
   - Bevy system that runs after field_update
-- `[ ]` Verify: dipole radiation reaches boundaries without strong reflections
+- `[x]` Verify: dipole radiation reaches boundaries without strong reflections
 - **Session output**: Simulation doesn't blow up at boundaries
 
 ### 1.6 — Validation: dipole radiation pattern
 - **Context:** `src/simulation/sources.rs` (SourceConfig API), `src/simulation/diagnostics.rs` (DerivedFields, energy computation), `src/simulation/grid.rs`, `src/visualization/slices.rs` (to verify visually), `README.md §Tier 1 Scenarios` (lines 190–220, for expected dipole physics — brief skim only)
 - **Depends on:** 1.2, 1.3, 1.4, 1.5
-- `[ ]` Implement `src/scenarios/dipole_radiation.rs`:
+- `[x]` Implement `src/scenarios/dipole_radiation.rs`:
   - `fn setup_dipole_scenario(grid: &mut SimulationGrid, sources: &mut SourceConfig)`:
     - Place oscillating dipole at grid center
     - Set frequency such that wavelength = ~20 cells (resolvable)
@@ -284,8 +284,8 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
     - Check polarization: E perpendicular to propagation direction
     - Check energy conservation: total energy increases at rate matching source power
     - Check S ≈ 0 in standard mode
-- `[ ]` Add scenario selector to UI (dropdown that loads preset configurations)
-- `[ ]` Verify: visually confirm dipole radiation pattern in slice view
+- `[x]` Add scenario selector to UI (dropdown that loads preset configurations)
+- `[x]` Verify: visually confirm dipole radiation pattern in slice view
 - **Session output**: Validated baseline — standard FDTD is correct before extending it
 
 ---
@@ -295,7 +295,7 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
 ### 2.1 — Extended mode: scalar field dynamics
 - **Context:** `ARCHITECTURE.md §GPU Compute Shader: Field Update Kernel` (lines 350–385, the extended_mode branching logic), `src/simulation/field_update.rs` (existing CPU implementation to modify), `src/simulation/plugin.rs` (SimulationConfig)
 - **Depends on:** 1.6 (must validate standard mode first)
-- `[ ]` Modify `field_update.rs` to fully support extended mode:
+- `[x]` Modify `field_update.rs` to fully support extended mode:
   - When `extended_mode = true`:
     - Do NOT enforce Lorenz gauge (do not subtract grad(S) to zero it out)
     - S field evolves dynamically via: □S = -ρ/ε₀
@@ -311,23 +311,28 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
   - `//   → the -c²∇S in the vector components couples S back into potential evolution`
   - `//   → S propagates as a genuine longitudinal wave driven by charge fluctuations`
   - `// See ARCHITECTURE.md WGSL kernel for the authoritative implementation`
-- `[ ]` Add toggle to UI: "Standard EM / Extended QVED" switch
-- `[ ]` Verify: in standard mode, S stays near zero; in extended mode, S propagates from sources
+- `[x]` Add toggle to UI: "Standard EM / Extended QVED" switch
+- `[x]` Verify: in standard mode, S stays near zero; in extended mode, S propagates from sources
 - **Session output**: The fundamental theoretical extension is live and toggleable
 
 ### 2.2 — S-field dedicated visualization
 - **Context:** `src/visualization/slices.rs` (existing slice system to extend), `src/visualization/color_maps.rs` (ScalarField bipolar map), `src/simulation/diagnostics.rs` (S field data)
 - **Depends on:** 2.1, 1.4
-- `[ ]` Enhance slice visualization to handle bipolar (positive/negative) fields:
+- `[x]` Enhance slice visualization to handle bipolar (positive/negative) fields:
   - S field is signed → use `ScalarField` color map (blue-white-red)
   - Add auto-ranging: compute min/max S each frame for color normalization
   - Add manual range lock (so color scale doesn't flicker)
   - Add S-field magnitude isosurface option
-- `[ ]` Add a second simultaneous slice plane option:
+- `[x]` Add a second simultaneous slice plane option:
   - Slice 1: |E| or |B| (to see transverse waves)
   - Slice 2: S field (to see longitudinal waves)
   - Both visible at orthogonal orientations for comparison
-- `[ ]` Verify: can visually distinguish transverse and longitudinal modes side by side
+- `[x]` Verify: can visually distinguish transverse and longitudinal modes side by side
+- `[x]` Fix slice position updates: replace entire `Image` asset via `images.insert()` each frame (Bevy 0.15 texture re-upload gotcha)
+- `[x]` Fix auto-range minimum threshold: `1e-6` instead of `1e-30` to avoid `map_value` t=0.5 fallback
+- `[x]` Add per-slice stats display (sample count, value min/max, range min/max) in UI
+- `[x]` Add diagnostic logging (throttled to ~1/sec) in `update_slice_texture`
+- `[x]` Add configurable temporal resolution: `dt_factor` (0.01–1.0) logarithmic slider scales dt below CFL max; effective dt and sim time/frame shown in UI
 - **Session output**: Clear visual comparison between standard and extended EM
 
 ### 2.3 — Bifilar coil source geometry
@@ -892,6 +897,11 @@ These are non-blocking inconsistencies or scope questions to revisit as the rele
 ### Crate Compatibility (verified in Phase 0.1)
 - **bevy_egui 0.33 + Bevy 0.15:** Verified — bevy_egui 0.34 targets Bevy 0.16, so 0.33 is used instead. Locked in Cargo.toml.
 - **CellState size assertion:** Add `const_assert!(std::mem::size_of::<CellState>() == 48)` or equivalent static check to catch layout surprises.
+
+### Visualization / Bevy
+- **Dynamic texture updates (Bevy 0.15):** Neither `images.get_mut()` + modifying `data`, NOR `images.insert(&handle, new_image)` reliably triggers Bevy's render asset re-extraction. The working fix: create a genuinely new `Image` via `images.add(new_image)` each frame, update the `StandardMaterial.base_color_texture` to the new handle, and `images.remove()` the old one. This forces a fresh GPU upload every frame.
+- **Auto-range minimum:** The `auto_range` function's minimum range must be > `f32::EPSILON` (~1.19e-7). A minimum of `1e-6` prevents `map_value` from hitting the "zero range" fallback (t=0.5 → misleading mid-colormap color for uniform fields).
+- **System ordering:** Visualization systems must run `.after(SimulationSet)` with `apply_deferred` inserted between entity spawn (`manage_slice_entity`) and texture update (`update_slice_texture`) to ensure deferred entity commands are flushed before queries.
 
 ### Architecture
 - **CPU/GPU coexistence:** `simulation/field_update.rs` hosts the CPU implementation. When GPU is added (Phase 5), the CPU path is retained behind a `SimulationConfig.use_gpu: bool` flag for the CPU-GPU equivalence test and for debugging. The GPU dispatch wraps Bevy's `RenderDevice`/`RenderQueue`.
