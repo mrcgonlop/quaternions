@@ -287,10 +287,14 @@ pub fn sample_slice(
 
     let mut values = Vec::with_capacity((width * height) as usize);
 
-    for v in 0..height {
+    // Iterate v in reverse: image row 0 (UV v=0) is at the TOP of the quad
+    // (positive local Y = positive world Y/Z), so the highest grid index
+    // must come first to avoid a vertical flip.
+    for v in (0..height).rev() {
         for u in 0..width {
             let (x, y, z) = match config.axis {
-                SliceAxis::X => (pos, u, v),
+                // u→Z, v→Y (matches transform: local X→world Z, local Y→world Y)
+                SliceAxis::X => (pos, v, u),
                 SliceAxis::Y => (u, pos, v),
                 SliceAxis::Z => (u, v, pos),
             };
@@ -321,9 +325,15 @@ fn sample_vector_at(
 }
 
 /// Return (width, height) of the 2D slice for a given axis.
+///
+/// Width maps to the quad's local X (texture u), height to local Y (texture v).
+/// After the slice transform, these must correspond to the correct world axes:
+///   X-slice: quad local X → world Z, local Y → world Y  ⇒  width=nz, height=ny
+///   Y-slice: quad local X → world X, local Y → world Z  ⇒  width=nx, height=nz
+///   Z-slice: quad local X → world X, local Y → world Y  ⇒  width=nx, height=ny
 fn slice_dimensions(grid: &SimulationGrid, axis: SliceAxis) -> (u32, u32) {
     match axis {
-        SliceAxis::X => (grid.ny, grid.nz),
+        SliceAxis::X => (grid.nz, grid.ny),
         SliceAxis::Y => (grid.nx, grid.nz),
         SliceAxis::Z => (grid.nx, grid.ny),
     }
@@ -479,10 +489,10 @@ pub fn update_slice_texture(
                     let mut r_vals = Vec::with_capacity(pixel_count);
                     let mut g_vals = Vec::with_capacity(pixel_count);
                     let mut b_vals = Vec::with_capacity(pixel_count);
-                    for v in 0..height {
+                    for v in (0..height).rev() {
                         for u in 0..width {
                             let (x, y, z) = match cfg.axis {
-                                SliceAxis::X => (pos, u, v),
+                                SliceAxis::X => (pos, v, u),
                                 SliceAxis::Y => (u, pos, v),
                                 SliceAxis::Z => (u, v, pos),
                             };
@@ -492,31 +502,40 @@ pub fn update_slice_texture(
                             b_vals.push(sample_field_at(&grid, &diag, idx, cfg.rgb_b_field));
                         }
                     }
-                    let r_max = r_vals.iter().copied().fold(0.0f32, |a, b| a.max(b.abs())).max(1e-6);
-                    let g_max = g_vals.iter().copied().fold(0.0f32, |a, b| a.max(b.abs())).max(1e-6);
-                    let b_max = b_vals.iter().copied().fold(0.0f32, |a, b| a.max(b.abs())).max(1e-6);
+                    let r_abs_max = r_vals.iter().copied().fold(0.0f32, |a, b| a.max(b.abs())).max(1e-6);
+                    let g_abs_max = g_vals.iter().copied().fold(0.0f32, |a, b| a.max(b.abs())).max(1e-6);
+                    let b_abs_max = b_vals.iter().copied().fold(0.0f32, |a, b| a.max(b.abs())).max(1e-6);
+                    // Use symmetric range [-max, +max] for signed fields so
+                    // negative values map to 0.0 and positive to 1.0 (zero = 0.5).
+                    // For unsigned fields, min=0 is fine since values are non-negative.
+                    let r_signed = cfg.rgb_r_field.is_signed();
+                    let g_signed = cfg.rgb_g_field.is_signed();
+                    let b_signed = cfg.rgb_b_field.is_signed();
+                    let r_min = if r_signed { -r_abs_max } else { 0.0 };
+                    let g_min = if g_signed { -g_abs_max } else { 0.0 };
+                    let b_min = if b_signed { -b_abs_max } else { 0.0 };
                     let mut pix = Vec::with_capacity(pixel_count * 4);
                     for i in 0..pixel_count {
                         let color = color_maps::encode_rgb_multi(
-                            r_vals[i], 0.0, r_max,
-                            g_vals[i], 0.0, g_max,
-                            b_vals[i], 0.0, b_max,
+                            r_vals[i], r_min, r_abs_max,
+                            g_vals[i], g_min, g_abs_max,
+                            b_vals[i], b_min, b_abs_max,
                         );
                         pix.push((color[0] * 255.0) as u8);
                         pix.push((color[1] * 255.0) as u8);
                         pix.push((color[2] * 255.0) as u8);
                         pix.push((color[3] * 255.0) as u8);
                     }
-                    (pix, pixel_count, 0.0, r_max.max(g_max).max(b_max), 0.0, 1.0)
+                    (pix, pixel_count, 0.0, r_abs_max.max(g_abs_max).max(b_abs_max), 0.0, 1.0)
                 }
                 ColorEncoding::HsvPhase => {
                     // Sample vector field, encode as HSV
                     let mut max_mag = 0.0f32;
                     let mut vectors = Vec::with_capacity(pixel_count);
-                    for v in 0..height {
+                    for v in (0..height).rev() {
                         for u in 0..width {
                             let (x, y, z) = match cfg.axis {
-                                SliceAxis::X => (pos, u, v),
+                                SliceAxis::X => (pos, v, u),
                                 SliceAxis::Y => (u, pos, v),
                                 SliceAxis::Z => (u, v, pos),
                             };

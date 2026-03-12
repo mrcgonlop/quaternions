@@ -125,6 +125,10 @@ pub fn inject_sources(grid: &mut SimulationGrid, sources: &SourceConfig, params:
 
         let cell = grid.cell_mut(gx, gy, gz);
 
+        // Mark the cell so geometry visualization can draw a source marker.
+        // The flag persists until grid.reset() clears all non-PML flags.
+        cell.flags |= crate::simulation::state::CellFlags::SOURCE;
+
         match &source.source_type {
             SourceType::OscillatingDipole { axis } => {
                 // J(t) = J0 * sin(2πft + phase)
@@ -138,10 +142,16 @@ pub fn inject_sources(grid: &mut SimulationGrid, sources: &SourceConfig, params:
                 cell.q_dot[axis + 1] += (j / epsilon_0) * dt;
             }
             SourceType::PointCharge => {
-                // Static charge: set phi/c at the source cell.
+                // Soft source: drive phi/c toward the Coulomb value via feedback.
                 // phi ≈ q / (4πε₀ * dx) (monopole approximation at the cell)
+                // Instead of hard-setting q[0] (which creates a permanent
+                // Laplacian discontinuity that destabilizes extended mode),
+                // we apply proportional feedback through q_dot[0].
                 let phi = source.amplitude / (4.0 * std::f32::consts::PI * epsilon_0 * dx);
-                cell.q[0] = phi / c0;
+                let target_q0 = phi / c0;
+                let error = target_q0 - cell.q[0];
+                // Relax toward target over ~dx/c0 timescale
+                cell.q_dot[0] += error * (c0 / dx) * dt;
             }
             SourceType::CurrentPulse { axis, sigma, t_center } => {
                 // Gaussian-envelope current pulse
@@ -155,22 +165,6 @@ pub fn inject_sources(grid: &mut SimulationGrid, sources: &SourceConfig, params:
     }
 }
 
-/// Bevy system that injects sources before the field update.
-pub fn source_injection_system(
-    mut grid: Option<ResMut<SimulationGrid>>,
-    sources: Option<Res<SourceConfig>>,
-    config: Res<crate::simulation::plugin::SimulationConfig>,
-) {
-    let Some(ref mut grid) = grid else { return };
-    let Some(ref sources) = sources else { return };
-    if config.paused || sources.sources.is_empty() {
-        return;
-    }
-
-    let effective_dt = grid.dt * config.dt_factor.clamp(0.01, 1.0);
-    let params = grid.sim_params_with_dt(config.extended_mode, effective_dt);
-    inject_sources(grid, sources, &params);
-}
 
 #[cfg(test)]
 mod tests {
@@ -201,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn test_point_charge_sets_phi() {
+    fn test_point_charge_drives_phi() {
         let mut grid = SimulationGrid::new(8, 8, 8, 0.01);
         let params = grid.sim_params(false);
 
@@ -211,8 +205,11 @@ mod tests {
 
         inject_sources(&mut grid, &sources, &params);
 
-        // q[0] = phi/c should be nonzero
-        assert_ne!(grid.cell(4, 4, 4).q[0], 0.0, "point charge should set phi");
+        // Soft source drives q_dot[0] toward target, so q_dot[0] should be nonzero
+        assert_ne!(
+            grid.cell(4, 4, 4).q_dot[0], 0.0,
+            "point charge should drive q_dot[0]"
+        );
     }
 
     #[test]

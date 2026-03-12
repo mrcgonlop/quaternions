@@ -1,62 +1,44 @@
 // CPU implementation of the quaternionic FDTD field update.
 // Ports the WGSL kernel from ARCHITECTURE.md §GPU Compute Shader to Rust.
 //
-// Physics: d²Q/dt² = c_local² * ∇²Q  [standard mode]
-//          d²Q/dt² = c_local² * ∇²Q - c_local² * (0, ∇S)  [extended QVED]
+// Physics (ungauged Maxwell potential equations):
+//   Standard mode:  d²Q/dt² = c² * ∇²Q
+//   Extended QVED:  d²Q[0]/dt² = c² * ∇²Q[0] + c * ∂S/∂t   (scalar, α=1 exactly)
+//                   d²A/dt²    = c² * ∇²A     - c² * ∇S      (vector)
+//                   □S         = 0                             (S as independent field)
+//
+// S is an INDEPENDENT dynamical variable stored in grid.s_field (double-buffered)
+// and grid.s_dot (half-step velocity).  It evolves via its own leapfrog loop:
+//   s_dot(t+dt/2) = s_dot(t-dt/2) + c² * ∇²S(t) * dt
+//   s(t+dt)       = s(t)          + s_dot(t+dt/2) * dt
+//
+// The coupling to Q uses s_dot directly (no approximation):
+//   q_ddot[0] += c * s_dot[i]           (α=1.0 — true QVED, not a reduced approximation)
+//   q_ddot[1..3] -= c² * ∇S[t]
+//
+// This eliminates the former SCALAR_COUPLING_ALPHA=0.2 approximation. The CFL
+// condition is unchanged: S propagates at c (same as Q), so no dt reduction
+// is needed.
 //
 // Integration: Störmer-Verlet (leapfrog) with staggered half-step velocity:
 //   q_dot(t+dt/2) = q_dot(t-dt/2) + q_ddot(t) * dt
 //   q(t+dt) = q(t) + q_dot(t+dt/2) * dt
 //
-// Double-buffer: read from cells[current], write to cells[1 - current], swap.
+// Double-buffer: read from cells[current]/s_field[current],
+//                write to cells[1-current]/s_field[1-current], swap current.
 //
 // CPML (Convolutional PML): When a PmlState is provided, PML-flagged cells get
 // modified Laplacian components. For each direction, the second derivative is
 // corrected: lap_dir_pml = inv_kappa * lap_dir + psi, where psi is an auxiliary
 // field updated each timestep via psi = b * psi + a * lap_dir.
+// S uses the standard (non-CPML) Laplacian in PML cells. Full CPML for S would
+// require extending PmlState.psi from n_pml*12 to n_pml*15 entries (one extra
+// component for S × 3 spatial directions) — deferred to a future session.
 
 use crate::math::fdtd;
 use crate::simulation::boundaries::PmlState;
 use crate::simulation::grid::SimulationGrid;
-use crate::simulation::state::{CellFlags, CellState, SimParams};
-
-/// Compute the scalar field S at a given cell from the read buffer.
-///
-/// S = q_dot.w / c_local + div(A)
-/// where div(A) = dAx/dx + dAy/dy + dAz/dz computed via central differences.
-///
-/// Returns 0.0 for boundary cells that lack neighbors for the stencil.
-#[inline]
-fn compute_s_at(
-    cells: &[CellState],
-    x: usize,
-    y: usize,
-    z: usize,
-    nx: usize,
-    ny: usize,
-    nz: usize,
-    inv_2dx: f32,
-    c0: f32,
-) -> f32 {
-    // Need neighbors in all 3 directions — must be interior
-    if !fdtd::is_interior(x, y, z, nx, ny, nz) {
-        return 0.0;
-    }
-
-    let i = fdtd::idx(x, y, z, nx, ny);
-    let stride_y = nx;
-    let stride_z = nx * ny;
-    let c_local = c0 / cells[i].k;
-
-    // div(A) = dAx/dx + dAy/dy + dAz/dz
-    // A = (q[1], q[2], q[3]) — the vector part of Q
-    let div_a = (cells[i + 1].q[1] - cells[i - 1].q[1]) * inv_2dx
-        + (cells[i + stride_y].q[2] - cells[i - stride_y].q[2]) * inv_2dx
-        + (cells[i + stride_z].q[3] - cells[i - stride_z].q[3]) * inv_2dx;
-
-    // S = (1/c) * d(phi/c)/dt + div(A) = q_dot.w / c_local + div(A)
-    cells[i].q_dot[0] / c_local + div_a
-}
+use crate::simulation::state::{CellFlags, SimParams};
 
 /// Check if a cell has all 6 neighbors in the grid (not on the outermost face).
 #[inline]
@@ -79,7 +61,7 @@ fn has_neighbors(x: usize, y: usize, z: usize, nx: usize, ny: usize, nz: usize) 
 /// 3. Compute per-direction second derivatives of Q
 /// 4. If PML cell: apply CPML correction (psi update + modified derivative)
 /// 5. Sum to get Laplacian, compute q_ddot = c² * lap_Q
-/// 6. If extended_mode: subtract c² * (0, grad_S)
+/// 6. If extended_mode: add c·∂S/∂t to q_ddot[0], subtract c²·∇S from q_ddot[1..3]
 /// 7. Leapfrog: q_dot += q_ddot * dt, q += q_dot * dt
 pub fn step_field_cpu(
     grid: &mut SimulationGrid,
@@ -100,9 +82,41 @@ pub fn step_field_cpu(
     let stride_y = nx;
     let stride_z = nx * ny;
 
+    let n_cells = nx * ny * nz;
+
+    // -------------------------------------------------------------------------
+    // Pre-pass: compute ∇²S(t) for use in the S leapfrog update.
+    // Read from s_field[current] (S at integer step t).
+    // Also needed for grad(S) in the Q coupling — but that reads s_field[current]
+    // directly in the cell loop (no need to pre-compute the gradient).
+    // -------------------------------------------------------------------------
+    let lap_s = if extended {
+        let s = &grid.s_field[grid.current]; // immutable borrow, released at end of block
+        let mut lap = vec![0.0f32; n_cells];
+        for z in 0..nz {
+            for y in 0..ny {
+                for x in 0..nx {
+                    if !fdtd::is_interior(x, y, z, nx, ny, nz) {
+                        continue;
+                    }
+                    let i = fdtd::idx(x, y, z, nx, ny);
+                    lap[i] = (s[i + 1] + s[i - 1] - 2.0 * s[i]) * inv_dx2
+                        + (s[i + stride_y] + s[i - stride_y] - 2.0 * s[i]) * inv_dx2
+                        + (s[i + stride_z] + s[i - stride_z] - 2.0 * s[i]) * inv_dx2;
+                }
+            }
+        }
+        lap
+        // `s` borrow is released here (lap_s owns a Vec, not a reference)
+    } else {
+        Vec::new()
+    };
+
     let read = grid.current;
 
-    // Split borrows: read from cells[read], write to cells[write].
+    // Split borrows: read from cells[read], write to cells[1-read].
+    // grid.s_field and grid.s_dot are different struct fields — borrow checker
+    // allows them to be borrowed independently after grid.cells is split.
     let (read_buf, write_buf) = if read == 0 {
         let (a, b) = grid.cells.split_at_mut(1);
         (&a[0][..], &mut b[0][..])
@@ -111,40 +125,47 @@ pub fn step_field_cpu(
         (&b[0][..], &mut a[0][..])
     };
 
+    // Split s_field for read/write (same current index as cells).
+    let (s_read, s_write) = if read == 0 {
+        let (a, b) = grid.s_field.split_at_mut(1);
+        (&a[0][..], &mut b[0][..])
+    } else {
+        let (a, b) = grid.s_field.split_at_mut(1);
+        (&b[0][..], &mut a[0][..])
+    };
+
+    // s_dot is updated in-place (half-step velocity, no double-buffer needed).
+    let s_dot = &mut grid.s_dot;
+
+    // =========================================================================
+    // Q update loop
+    // =========================================================================
     for z in 0..nz {
         for y in 0..ny {
             for x in 0..nx {
                 let i = fdtd::idx(x, y, z, nx, ny);
                 let cell = &read_buf[i];
 
-                // Copy cell to write buffer first (outermost face cells stay unchanged)
+                // Copy cell to write buffer (face cells stay unchanged this step).
                 write_buf[i] = *cell;
 
-                // Skip hard boundary cells
+                // Skip hard-wall boundary cells (CellFlags::BOUNDARY is reserved for
+                // future explicit conductors; no code sets it today).
                 if (cell.flags & CellFlags::BOUNDARY) != 0 {
                     continue;
                 }
 
-                // Need all 6 neighbors to compute Laplacian
+                // Laplacian requires all 6 neighbors.
                 if !has_neighbors(x, y, z, nx, ny, nz) {
                     continue;
                 }
 
-                // For non-PML cells that are not interior (this shouldn't happen with
-                // proper PML setup, but guard against it)
                 let is_pml_cell = (cell.flags & CellFlags::PML) != 0;
-                let is_interior = fdtd::is_interior(x, y, z, nx, ny, nz);
 
-                // Update interior cells and PML cells that have neighbors
-                if !is_interior && !is_pml_cell {
-                    continue;
-                }
-
-                let k = cell.k;
-                let c_local = c0 / k;
+                let c_local = c0 / cell.k;
                 let c_local_sq = c_local * c_local;
 
-                // --- Per-direction second derivatives of Q ---
+                // --- Per-direction second derivatives of Q (with optional CPML) ---
                 let mut lap_q = [0.0f32; 4];
 
                 for comp in 0..4 {
@@ -160,14 +181,12 @@ pub fn step_field_cpu(
                         - 2.0 * cell.q[comp])
                         * inv_dx2;
 
-                    // Apply CPML corrections if this is a PML cell
                     if is_pml_cell {
                         if let Some(ref mut pml_state) = pml {
                             if let Some(pml_idx) = pml_state.grid_to_pml[i] {
                                 let coeff_base = pml_idx * 3;
                                 let psi_base = pml_idx * 12 + comp * 3;
 
-                                // X direction
                                 let bx = pml_state.b[coeff_base];
                                 let ax = pml_state.a[coeff_base];
                                 let ikx = pml_state.inv_kappa[coeff_base];
@@ -175,7 +194,6 @@ pub fn step_field_cpu(
                                     bx * pml_state.psi[psi_base] + ax * lap_x;
                                 let lap_x_pml = ikx * lap_x + pml_state.psi[psi_base];
 
-                                // Y direction
                                 let by = pml_state.b[coeff_base + 1];
                                 let ay = pml_state.a[coeff_base + 1];
                                 let iky = pml_state.inv_kappa[coeff_base + 1];
@@ -183,7 +201,6 @@ pub fn step_field_cpu(
                                     by * pml_state.psi[psi_base + 1] + ay * lap_y;
                                 let lap_y_pml = iky * lap_y + pml_state.psi[psi_base + 1];
 
-                                // Z direction
                                 let bz = pml_state.b[coeff_base + 2];
                                 let az = pml_state.a[coeff_base + 2];
                                 let ikz = pml_state.inv_kappa[coeff_base + 2];
@@ -192,16 +209,15 @@ pub fn step_field_cpu(
                                 let lap_z_pml = ikz * lap_z + pml_state.psi[psi_base + 2];
 
                                 lap_q[comp] = lap_x_pml + lap_y_pml + lap_z_pml;
-                                continue; // skip the standard sum below
+                                continue;
                             }
                         }
                     }
 
-                    // Standard (non-PML) Laplacian
                     lap_q[comp] = lap_x + lap_y + lap_z;
                 }
 
-                // --- Compute q_ddot = c_local² * lap_Q ---
+                // --- q_ddot = c_local² * ∇²Q ---
                 let mut q_ddot = [
                     c_local_sq * lap_q[0],
                     c_local_sq * lap_q[1],
@@ -209,44 +225,101 @@ pub fn step_field_cpu(
                     c_local_sq * lap_q[3],
                 ];
 
-                // --- Extended mode: subtract c_local² * (0, grad_S) ---
-                if extended {
-                    let s_xp =
-                        compute_s_at(read_buf, x + 1, y, z, nx, ny, nz, inv_2dx, c0);
-                    let s_xm =
-                        compute_s_at(read_buf, x - 1, y, z, nx, ny, nz, inv_2dx, c0);
-                    let s_yp =
-                        compute_s_at(read_buf, x, y + 1, z, nx, ny, nz, inv_2dx, c0);
-                    let s_ym =
-                        compute_s_at(read_buf, x, y - 1, z, nx, ny, nz, inv_2dx, c0);
-                    let s_zp =
-                        compute_s_at(read_buf, x, y, z + 1, nx, ny, nz, inv_2dx, c0);
-                    let s_zm =
-                        compute_s_at(read_buf, x, y, z - 1, nx, ny, nz, inv_2dx, c0);
+                // --- Extended QVED coupling (skipped for PML cells) ---
+                //
+                // True coupling at α=1.0 — no reduced approximation:
+                //   q_ddot[0] += c · s_dot[i]       (scalar: +c · ∂S/∂t)
+                //   q_ddot[1..3] -= c² · ∇S[t]      (vector: -c² · ∇S)
+                //
+                // Using s_dot[i] (the actual half-step ∂S/∂t from the independent S
+                // field) avoids the former analytical approximation and the CFL
+                // penalty it introduced (α was forced to 0.2 to stay below 0.235).
+                //
+                // PML cells are still excluded: adding driving terms inside CPML
+                // undermines absorption and can cause instability.
+                if extended && !is_pml_cell {
+                    q_ddot[0] += c_local * s_dot[i]; // α = 1.0 exactly
 
-                    let grad_s = [
-                        (s_xp - s_xm) * inv_2dx,
-                        (s_yp - s_ym) * inv_2dx,
-                        (s_zp - s_zm) * inv_2dx,
-                    ];
-
-                    q_ddot[1] -= c_local_sq * grad_s[0];
-                    q_ddot[2] -= c_local_sq * grad_s[1];
-                    q_ddot[3] -= c_local_sq * grad_s[2];
+                    let grad_s_x = (s_read[i + 1] - s_read[i - 1]) * inv_2dx;
+                    let grad_s_y = (s_read[i + stride_y] - s_read[i - stride_y]) * inv_2dx;
+                    let grad_s_z = (s_read[i + stride_z] - s_read[i - stride_z]) * inv_2dx;
+                    q_ddot[1] -= c_local_sq * grad_s_x;
+                    q_ddot[2] -= c_local_sq * grad_s_y;
+                    q_ddot[3] -= c_local_sq * grad_s_z;
                 }
 
-                // --- Leapfrog (Störmer-Verlet) integration ---
+                // --- Störmer-Verlet leapfrog ---
                 let out = &mut write_buf[i];
                 for comp in 0..4 {
                     out.q_dot[comp] = cell.q_dot[comp] + q_ddot[comp] * dt;
                     out.q[comp] = cell.q[comp] + out.q_dot[comp] * dt;
                 }
-
-                // Preserve non-field state
                 out.k = cell.k;
                 out.k_dot = cell.k_dot;
                 out.flags = cell.flags;
                 out._pad = cell._pad;
+            }
+        }
+    }
+
+    // =========================================================================
+    // S leapfrog update (extended mode only)
+    //
+    // s_dot(t+dt/2) = s_dot(t-dt/2) + c_local² * ∇²S(t) * dt
+    // s(t+dt)       = s(t)           + s_dot(t+dt/2) * dt
+    //
+    // S uses the standard (non-CPML) Laplacian in all cells, including PML.
+    // Full CPML for S requires extending PmlState.psi to n_pml*15 entries
+    // (one extra "component" for S × 3 spatial directions) — future work.
+    // =========================================================================
+    if extended {
+        for z in 0..nz {
+            for y in 0..ny {
+                for x in 0..nx {
+                    let i = fdtd::idx(x, y, z, nx, ny);
+
+                    if !fdtd::is_interior(x, y, z, nx, ny, nz) {
+                        // Face cells: Neumann BC — copy from the adjacent interior cell.
+                        // Applied after the interior loop via a separate face pass below.
+                        s_write[i] = s_read[i];
+                        continue;
+                    }
+
+                    // c_local from the cell state (K field).
+                    let c_local = c0 / read_buf[i].k;
+                    let c_local_sq = c_local * c_local;
+
+                    // s_dot(t+dt/2) = s_dot(t-dt/2) + c² * ∇²S * dt
+                    s_dot[i] += c_local_sq * lap_s[i] * dt;
+                    // s(t+dt) = s(t) + s_dot(t+dt/2) * dt
+                    s_write[i] = s_read[i] + s_dot[i] * dt;
+                }
+            }
+        }
+
+        // Neumann BC for S face cells (zero-gradient: copy from one cell in).
+        for z in 0..nz {
+            for y in 0..ny {
+                s_write[fdtd::idx(0, y, z, nx, ny)] =
+                    s_write[fdtd::idx(1, y, z, nx, ny)];
+                s_write[fdtd::idx(nx - 1, y, z, nx, ny)] =
+                    s_write[fdtd::idx(nx - 2, y, z, nx, ny)];
+            }
+        }
+        for z in 0..nz {
+            for x in 0..nx {
+                s_write[fdtd::idx(x, 0, z, nx, ny)] =
+                    s_write[fdtd::idx(x, 1, z, nx, ny)];
+                s_write[fdtd::idx(x, ny - 1, z, nx, ny)] =
+                    s_write[fdtd::idx(x, ny - 2, z, nx, ny)];
+            }
+        }
+        for y in 0..ny {
+            for x in 0..nx {
+                s_write[fdtd::idx(x, y, 0, nx, ny)] =
+                    s_write[fdtd::idx(x, y, 1, nx, ny)];
+                s_write[fdtd::idx(x, y, nz - 1, nx, ny)] =
+                    s_write[fdtd::idx(x, y, nz - 2, nx, ny)];
             }
         }
     }

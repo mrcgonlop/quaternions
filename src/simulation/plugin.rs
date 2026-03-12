@@ -31,6 +31,10 @@ pub struct SimulationConfig {
     /// Lower values give finer temporal resolution at the cost of slower progression.
     /// 1.0 = full CFL timestep (maximum stable), 0.1 = 10× finer resolution.
     pub dt_factor: f32,
+
+    /// When true, run exactly one step this frame even if paused, then clear the flag.
+    /// Set by the Step button in the UI.
+    pub step_requested: bool,
 }
 
 impl Default for SimulationConfig {
@@ -42,6 +46,7 @@ impl Default for SimulationConfig {
             steps_per_frame: 1,
             extended_mode: false,
             dt_factor: 1.0,
+            step_requested: false,
         }
     }
 }
@@ -63,7 +68,8 @@ impl Plugin for SimulationPlugin {
             .add_systems(
                 Update,
                 (
-                    sources::source_injection_system,
+                    // Source injection is now inside simulation_step_system's substep loop
+                    // so that sources are sampled at the correct time each substep.
                     simulation_step_system,
                     boundaries::boundary_system,
                     diagnostics::diagnostics_system,
@@ -102,23 +108,36 @@ fn init_grid(
 /// Per-frame simulation step system.
 /// Runs `steps_per_frame` iterations of the CPU field update when not paused.
 /// Uses `dt_factor` to scale the timestep below the CFL maximum.
+///
+/// Source injection is performed inside the substep loop so that sources
+/// are sampled at the correct simulation time for each substep, rather than
+/// only once per frame (which would leave most substeps undriven at high
+/// steps_per_frame values).
 fn simulation_step_system(
     grid: Option<ResMut<SimulationGrid>>,
-    config: Res<SimulationConfig>,
+    mut config: ResMut<SimulationConfig>,
+    source_config: Res<SourceConfig>,
     pml: Option<ResMut<crate::simulation::boundaries::PmlState>>,
 ) {
     let Some(mut grid) = grid else { return };
-    if config.paused {
+
+    let single_step = config.step_requested;
+    if config.paused && !single_step {
         return;
     }
 
     let effective_dt = grid.dt * config.dt_factor.clamp(0.01, 1.0);
-    let params = grid.sim_params_with_dt(config.extended_mode, effective_dt);
+    let step_count = if single_step { 1 } else { config.steps_per_frame };
 
-    // Convert Option<ResMut<PmlState>> to Option<&mut PmlState> for the field update
     let mut pml = pml;
-    for _ in 0..config.steps_per_frame {
+    for _ in 0..step_count {
+        let params = grid.sim_params_with_dt(config.extended_mode, effective_dt);
+        sources::inject_sources(&mut grid, &source_config, &params);
         step_field_cpu(&mut grid, &params, pml.as_deref_mut());
         grid.swap_and_advance_with_dt(effective_dt);
+    }
+
+    if single_step {
+        config.step_requested = false;
     }
 }

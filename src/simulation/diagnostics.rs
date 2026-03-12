@@ -112,11 +112,17 @@ pub fn compute_derived_fields(grid: &SimulationGrid, params: &SimParams) -> Vec<
                         - (cells[i + stride_y].q[1] - cells[i - stride_y].q[1]) * inv_2dx,
                 ];
 
-                // --- S = Q_dot.w / c_local + div(A) ---
+                // --- S: independent dynamical field in extended mode; Lorenz gauge term otherwise ---
                 let div_a = (cells[i + 1].q[1] - cells[i - 1].q[1]) * inv_2dx
                     + (cells[i + stride_y].q[2] - cells[i - stride_y].q[2]) * inv_2dx
                     + (cells[i + stride_z].q[3] - cells[i - stride_z].q[3]) * inv_2dx;
-                let s = cell.q_dot[0] / c_local + div_a;
+                let s = if params.extended_mode != 0 {
+                    // True QVED: S is a free dynamical field evolved by □S = 0.
+                    // Read it directly from the grid instead of the Lorenz gauge formula.
+                    grid.s_read()[i]
+                } else {
+                    cell.q_dot[0] / c_local + div_a
+                };
 
                 // --- Energy density ---
                 // u = 0.5 * epsilon_0 * |E|^2 + 0.5 / mu_0 * |B|^2 + 0.5 * epsilon_0 * S^2
@@ -144,8 +150,8 @@ pub fn compute_derived_fields(grid: &SimulationGrid, params: &SimParams) -> Vec<
 
 /// Compute total electromagnetic energy by summing energy_density * dx^3 over all cells.
 ///
-/// When `cells` is provided, PML-flagged cells are excluded from the sum so that
-/// the artificial PML absorption doesn't appear in energy diagnostics.
+/// Includes all cells (including PML). Use `total_energy_excluding_pml` to exclude
+/// PML cells so that artificial absorption does not appear in energy diagnostics.
 pub fn total_energy(derived: &[DerivedFields], dx: f32) -> f64 {
     let cell_volume = (dx as f64).powi(3);
     derived

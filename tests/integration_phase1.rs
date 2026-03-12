@@ -2,11 +2,12 @@
 //   Task 1.4: Slice plane visualization shows propagating fields
 //   Task 1.5: Absorbing boundaries prevent energy blowup
 
-use quaternions::simulation::boundaries::{apply_boundaries, BoundaryConfig};
+use quaternions::simulation::boundaries::{apply_boundaries, BoundaryConfig, PmlState};
 use quaternions::simulation::diagnostics::{compute_derived_fields, max_e, max_s, total_energy};
 use quaternions::simulation::field_update::step_field_cpu;
 use quaternions::simulation::grid::SimulationGrid;
 use quaternions::simulation::sources::{inject_sources, Source, SourceConfig};
+use quaternions::simulation::state::PmlConfig;
 use quaternions::visualization::color_maps::{map_value, ColorMap};
 use quaternions::visualization::slices::{sample_slice, FieldQuantity, SliceAxis, SliceConfig};
 
@@ -152,12 +153,12 @@ fn test_slice_all_axes() {
         max_s: 0.0,
     };
 
-    // X slice: should be ny x nz = 10 x 12
+    // X slice: width=nz (maps to world Z via local X), height=ny (maps to world Y via local Y)
     let mut config = SliceConfig::default();
     config.axis = SliceAxis::X;
     config.position = 4;
     let (w, h, _) = sample_slice(&grid, &diag, &config);
-    assert_eq!((w, h), (10, 12));
+    assert_eq!((w, h), (12, 10));
 
     // Y slice: should be nx x nz = 8 x 12
     config.axis = SliceAxis::Y;
@@ -359,6 +360,57 @@ fn test_extended_mode_s_propagates() {
     assert!(e_max_ext.is_finite() && e_max_ext > 0.0, "extended E should be nonzero");
 }
 
+/// Verify that extended mode with sources doesn't blow up over many steps.
+/// This was the original bug: the missing +c·∂S/∂t scalar correction caused
+/// d²S/dt² = 0, leading to linear S growth and eventual divergence.
+#[test]
+fn test_extended_mode_stability_with_sources() {
+    let n = 16;
+    let dx = 0.01;
+    let center = [n as f32 / 2.0; 3];
+
+    // Test with both dipole and point charge sources
+    let sources = SourceConfig {
+        sources: vec![
+            Source::dipole_z(center, 1.0, 1e9),
+            Source::point_charge([6.0, 8.0, 8.0], 1e-12),
+        ],
+    };
+
+    let mut grid = SimulationGrid::new(n, n, n, dx);
+    let bc_config = BoundaryConfig::default();
+
+    // Run for 500 steps in extended mode — enough to trigger the old blowup
+    for _ in 0..500 {
+        let p = grid.sim_params(true); // extended mode
+        inject_sources(&mut grid, &sources, &p);
+        step_field_cpu(&mut grid, &p, None);
+        grid.swap_and_advance();
+        apply_boundaries(&mut grid, &bc_config, p.dt);
+    }
+
+    // All cells must be finite (no NaN/inf blowup)
+    for cell in grid.read_buf() {
+        for c in 0..4 {
+            assert!(
+                cell.q[c].is_finite(),
+                "extended mode blowup: q[{c}] = {}",
+                cell.q[c]
+            );
+            assert!(
+                cell.q_dot[c].is_finite(),
+                "extended mode blowup: q_dot[{c}] = {}",
+                cell.q_dot[c]
+            );
+        }
+    }
+
+    // Energy should be finite and reasonable (not exponentially blown up)
+    let derived = compute_derived_fields(&grid, &grid.sim_params(true));
+    let energy = total_energy(&derived, dx);
+    assert!(energy.is_finite(), "total energy must be finite: {energy}");
+}
+
 /// Verify that the S field is essentially zero in standard (non-extended) mode
 /// after running a dipole scenario.
 #[test]
@@ -394,4 +446,124 @@ fn test_s_field_near_zero_standard_mode() {
             ratio
         );
     }
+}
+
+// =========================================================================
+// Regression: CPML + extended mode must not diverge
+//
+// Bug: grid.reset() cleared CellFlags::PML from every cell, disabling CPML
+// inside step_field_cpu while boundary_system still used the PML path (pure
+// Neumann extrapolation, no absorption). Result: fully reflective boundaries
+// → energy accumulation → divergence.
+//
+// Additionally, extended mode corrections were applied inside PML cells.
+// CPML is designed for the plain wave equation; adding ∂S/∂t and ∇S terms
+// inside the absorbing layer undermines absorption and can cause instability.
+// =========================================================================
+
+/// Verify that grid.reset() preserves PML flags.
+/// After reset, every cell that was PML before should still have CellFlags::PML.
+#[test]
+fn test_reset_preserves_pml_flags() {
+    use quaternions::simulation::state::CellFlags;
+
+    let n = 16u32;
+    let dx = 0.01;
+    let bc_config = BoundaryConfig::default();
+    let mut grid = SimulationGrid::new(n, n, n, dx);
+    let _pml = PmlState::new(&mut grid, &bc_config, PmlConfig::default());
+
+    // Count PML-flagged cells before reset
+    let pml_before: usize = grid
+        .read_buf()
+        .iter()
+        .filter(|c| (c.flags & CellFlags::PML) != 0)
+        .count();
+    assert!(pml_before > 0, "PML should flag some cells before reset");
+
+    grid.reset();
+
+    // Count PML-flagged cells after reset -- must be identical
+    let pml_after: usize = grid
+        .read_buf()
+        .iter()
+        .filter(|c| (c.flags & CellFlags::PML) != 0)
+        .count();
+    assert_eq!(
+        pml_after,
+        pml_before,
+        "reset() must preserve PML flags: had {pml_before}, got {pml_after}"
+    );
+
+    // Non-PML flags should have been cleared (SOURCE, CONDUCTOR, etc.)
+    let non_pml_flags = CellFlags::SOURCE | CellFlags::CONDUCTOR | CellFlags::BOUNDARY;
+    for cell in grid.read_buf() {
+        assert_eq!(
+            cell.flags & non_pml_flags,
+            0,
+            "non-PML flags should be cleared after reset"
+        );
+        // All field values must be zero
+        assert_eq!(cell.q, [0.0; 4]);
+        assert_eq!(cell.q_dot, [0.0; 4]);
+    }
+}
+
+/// Extended mode with CPML should remain stable for many steps.
+///
+/// Previously this diverged because:
+/// 1. grid.reset() cleared PML flags -> no CPML absorption
+/// 2. Extended corrections were applied in PML cells -> instability
+#[test]
+fn test_extended_mode_with_pml_stability() {
+    let n = 16u32;
+    let dx = 0.01;
+    let center = [n as f32 / 2.0; 3];
+
+    let sources = SourceConfig {
+        sources: vec![
+            Source::dipole_z(center, 1.0, 1e9),
+            Source::point_charge([4.0, 8.0, 8.0], 1e-12),
+        ],
+    };
+
+    let bc_config = BoundaryConfig::default();
+    let mut grid = SimulationGrid::new(n, n, n, dx);
+    let mut pml_state = PmlState::new(&mut grid, &bc_config, PmlConfig::default());
+
+    // Simulate a scenario load (grid.reset() must preserve PML flags)
+    grid.reset();
+    pml_state.reset_psi();
+
+    // Run 2000 steps in extended mode with CPML active
+    for _ in 0..2000 {
+        let p = grid.sim_params(true); // extended mode
+        inject_sources(&mut grid, &sources, &p);
+        step_field_cpu(&mut grid, &p, Some(&mut pml_state));
+        grid.swap_and_advance();
+    }
+
+    // All cells must be finite -- no NaN or Inf blowup
+    for (idx, cell) in grid.read_buf().iter().enumerate() {
+        for c in 0..4 {
+            assert!(
+                cell.q[c].is_finite(),
+                "cell {idx} q[{c}] blew up in extended+PML mode: {}",
+                cell.q[c]
+            );
+            assert!(
+                cell.q_dot[c].is_finite(),
+                "cell {idx} q_dot[{c}] blew up in extended+PML mode: {}",
+                cell.q_dot[c]
+            );
+        }
+    }
+
+    // Energy must also be finite
+    let derived = compute_derived_fields(&grid, &grid.sim_params(true));
+    let energy = total_energy(&derived, dx);
+    assert!(
+        energy.is_finite(),
+        "total energy must be finite after extended+PML run: {energy}"
+    );
 }

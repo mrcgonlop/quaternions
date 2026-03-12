@@ -352,11 +352,161 @@ pub fn apply_boundaries(grid: &mut SimulationGrid, config: &BoundaryConfig, effe
 
     // --- Step 4: Periodic boundaries ---
     apply_periodic(new_buf, config, nx, ny, nz, &idx);
+
+    // --- Step 5: S field boundaries: Mur ABC + sponge ---
+    let (sa, sb) = grid.s_field.split_at_mut(1);
+    let (s_new, s_old) = if cur == 0 {
+        (&mut sa[0][..], &sb[0][..])
+    } else {
+        (&mut sb[0][..], &sa[0][..])
+    };
+    apply_s_mur(s_new, s_old, config, nx, ny, nz, mur_coeff, &idx);
+    apply_s_sponge(s_new, &mut grid.s_dot, config, nx, ny, nz, &idx);
+}
+
+/// Apply Mur first-order ABC to the scalar S field at all Open faces.
+fn apply_s_mur(
+    s_new: &mut [f32],
+    s_old: &[f32],
+    config: &BoundaryConfig,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    mur_coeff: f32,
+    idx: &dyn Fn(usize, usize, usize) -> usize,
+) {
+    if config.neg_x == BoundaryType::Open {
+        for z in 0..nz {
+            for y in 0..ny {
+                let bi = idx(0, y, z);
+                let ni = idx(1, y, z);
+                s_new[bi] = s_old[ni] + mur_coeff * (s_new[ni] - s_old[bi]);
+            }
+        }
+    }
+    if config.pos_x == BoundaryType::Open {
+        for z in 0..nz {
+            for y in 0..ny {
+                let bi = idx(nx - 1, y, z);
+                let ni = idx(nx - 2, y, z);
+                s_new[bi] = s_old[ni] + mur_coeff * (s_new[ni] - s_old[bi]);
+            }
+        }
+    }
+    if config.neg_y == BoundaryType::Open {
+        for z in 0..nz {
+            for x in 0..nx {
+                let bi = idx(x, 0, z);
+                let ni = idx(x, 1, z);
+                s_new[bi] = s_old[ni] + mur_coeff * (s_new[ni] - s_old[bi]);
+            }
+        }
+    }
+    if config.pos_y == BoundaryType::Open {
+        for z in 0..nz {
+            for x in 0..nx {
+                let bi = idx(x, ny - 1, z);
+                let ni = idx(x, ny - 2, z);
+                s_new[bi] = s_old[ni] + mur_coeff * (s_new[ni] - s_old[bi]);
+            }
+        }
+    }
+    if config.neg_z == BoundaryType::Open {
+        for y in 0..ny {
+            for x in 0..nx {
+                let bi = idx(x, y, 0);
+                let ni = idx(x, y, 1);
+                s_new[bi] = s_old[ni] + mur_coeff * (s_new[ni] - s_old[bi]);
+            }
+        }
+    }
+    if config.pos_z == BoundaryType::Open {
+        for y in 0..ny {
+            for x in 0..nx {
+                let bi = idx(x, y, nz - 1);
+                let ni = idx(x, y, nz - 2);
+                s_new[bi] = s_old[ni] + mur_coeff * (s_new[ni] - s_old[bi]);
+            }
+        }
+    }
+}
+
+/// Apply sponge damping to the S field and s_dot at Open face regions.
+fn apply_s_sponge(
+    s_buf: &mut [f32],
+    s_dot: &mut [f32],
+    config: &BoundaryConfig,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    idx: &dyn Fn(usize, usize, usize) -> usize,
+) {
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
+                let mut factor = 1.0f32;
+
+                if config.neg_x == BoundaryType::Open && x < SPONGE_DEPTH {
+                    factor *= sponge_factor(x);
+                }
+                if config.pos_x == BoundaryType::Open && x >= nx - SPONGE_DEPTH {
+                    factor *= sponge_factor(nx - 1 - x);
+                }
+                if config.neg_y == BoundaryType::Open && y < SPONGE_DEPTH {
+                    factor *= sponge_factor(y);
+                }
+                if config.pos_y == BoundaryType::Open && y >= ny - SPONGE_DEPTH {
+                    factor *= sponge_factor(ny - 1 - y);
+                }
+                if config.neg_z == BoundaryType::Open && z < SPONGE_DEPTH {
+                    factor *= sponge_factor(z);
+                }
+                if config.pos_z == BoundaryType::Open && z >= nz - SPONGE_DEPTH {
+                    factor *= sponge_factor(nz - 1 - z);
+                }
+
+                if (factor - 1.0).abs() < 1e-7 {
+                    continue;
+                }
+
+                let i = idx(x, y, z);
+                s_buf[i] *= factor;
+                s_dot[i] *= factor;
+            }
+        }
+    }
+}
+
+/// Apply S sponge via a plain `&mut SimulationGrid` parameter so that
+/// the borrow checker can split the `s_field` and `s_dot` fields.
+///
+/// `apply_s_sponge` takes raw slices; when called through a `ResMut<SimulationGrid>`
+/// smart pointer the borrow checker can't prove the two slices are disjoint because
+/// it loses track of the field identity through `DerefMut`. Wrapping the call in a
+/// function whose parameter is `&mut SimulationGrid` restores field-level splitting.
+fn apply_s_sponge_on_grid(
+    grid: &mut SimulationGrid,
+    config: &BoundaryConfig,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    idx: &dyn Fn(usize, usize, usize) -> usize,
+) {
+    let cur = grid.current;
+    let (sf_a, sf_b) = grid.s_field.split_at_mut(1);
+    let s_buf = if cur == 0 { &mut sf_a[0][..] } else { &mut sf_b[0][..] };
+    apply_s_sponge(s_buf, &mut grid.s_dot, config, nx, ny, nz, idx);
 }
 
 /// Apply the Mur first-order ABC to a single boundary cell.
 ///
-/// u_boundary(t+dt) = u_neighbor(t) + coeff * (u_neighbor(t+dt) - u_boundary(t))
+/// q: u_boundary(t+dt) = u_neighbor(t) + coeff * (u_neighbor(t+dt) - u_boundary(t))
+///
+/// q_dot lives at half-integer timesteps in the Störmer-Verlet leapfrog, so the Mur
+/// coefficient (derived for integer-step fields via c·dt and neighboring field values)
+/// does not apply to it. Applying the same formula to q_dot introduces a phase
+/// mismatch that causes small spurious reflections. q_dot at the boundary is set via
+/// zero-order (Neumann) extrapolation from the adjacent interior cell instead.
 #[inline]
 fn mur_update(
     new_buf: &mut [crate::simulation::state::CellState],
@@ -366,10 +516,11 @@ fn mur_update(
     coeff: f32,
 ) {
     for c in 0..4 {
+        // Mur first-order ABC — valid for q (integer-timestep quantity).
         new_buf[bi].q[c] = old_buf[ni].q[c]
             + coeff * (new_buf[ni].q[c] - old_buf[bi].q[c]);
-        new_buf[bi].q_dot[c] = old_buf[ni].q_dot[c]
-            + coeff * (new_buf[ni].q_dot[c] - old_buf[bi].q_dot[c]);
+        // q_dot: zero-order extrapolation avoids the leapfrog phase mismatch.
+        new_buf[bi].q_dot[c] = new_buf[ni].q_dot[c];
     }
 }
 
@@ -500,7 +651,15 @@ fn apply_conducting(
     }
 }
 
-/// Apply periodic boundary conditions by averaging opposite face values.
+/// Apply periodic boundary conditions by swapping opposite face cell values.
+///
+/// The two face cells act as ghost cells for each other: on the next field-update
+/// step the stencil at lo+1 will read buf[lo] (which now holds the original hi
+/// value) and the stencil at hi-1 will read buf[hi] (which now holds the original
+/// lo value).  This is the correct ghost-cell semantics for periodic boundaries.
+///
+/// The previous implementation averaged the two faces, which made them equal but
+/// at half amplitude — introducing energy damping at every periodic boundary call.
 fn apply_periodic(
     buf: &mut [crate::simulation::state::CellState],
     config: &BoundaryConfig,
@@ -515,12 +674,12 @@ fn apply_periodic(
                 let lo = idx(0, y, z);
                 let hi = idx(nx - 1, y, z);
                 for c in 0..4 {
-                    let avg = (buf[lo].q[c] + buf[hi].q[c]) * 0.5;
-                    buf[lo].q[c] = avg;
-                    buf[hi].q[c] = avg;
-                    let avg_d = (buf[lo].q_dot[c] + buf[hi].q_dot[c]) * 0.5;
-                    buf[lo].q_dot[c] = avg_d;
-                    buf[hi].q_dot[c] = avg_d;
+                    let tmp = buf[lo].q[c];
+                    buf[lo].q[c] = buf[hi].q[c];
+                    buf[hi].q[c] = tmp;
+                    let tmp = buf[lo].q_dot[c];
+                    buf[lo].q_dot[c] = buf[hi].q_dot[c];
+                    buf[hi].q_dot[c] = tmp;
                 }
             }
         }
@@ -532,12 +691,12 @@ fn apply_periodic(
                 let lo = idx(x, 0, z);
                 let hi = idx(x, ny - 1, z);
                 for c in 0..4 {
-                    let avg = (buf[lo].q[c] + buf[hi].q[c]) * 0.5;
-                    buf[lo].q[c] = avg;
-                    buf[hi].q[c] = avg;
-                    let avg_d = (buf[lo].q_dot[c] + buf[hi].q_dot[c]) * 0.5;
-                    buf[lo].q_dot[c] = avg_d;
-                    buf[hi].q_dot[c] = avg_d;
+                    let tmp = buf[lo].q[c];
+                    buf[lo].q[c] = buf[hi].q[c];
+                    buf[hi].q[c] = tmp;
+                    let tmp = buf[lo].q_dot[c];
+                    buf[lo].q_dot[c] = buf[hi].q_dot[c];
+                    buf[hi].q_dot[c] = tmp;
                 }
             }
         }
@@ -549,12 +708,12 @@ fn apply_periodic(
                 let lo = idx(x, y, 0);
                 let hi = idx(x, y, nz - 1);
                 for c in 0..4 {
-                    let avg = (buf[lo].q[c] + buf[hi].q[c]) * 0.5;
-                    buf[lo].q[c] = avg;
-                    buf[hi].q[c] = avg;
-                    let avg_d = (buf[lo].q_dot[c] + buf[hi].q_dot[c]) * 0.5;
-                    buf[lo].q_dot[c] = avg_d;
-                    buf[hi].q_dot[c] = avg_d;
+                    let tmp = buf[lo].q[c];
+                    buf[lo].q[c] = buf[hi].q[c];
+                    buf[hi].q[c] = tmp;
+                    let tmp = buf[lo].q_dot[c];
+                    buf[lo].q_dot[c] = buf[hi].q_dot[c];
+                    buf[hi].q_dot[c] = tmp;
                 }
             }
         }
@@ -590,6 +749,10 @@ pub fn boundary_system(
         let nz = grid.nz as usize;
         let cur = grid.current;
         let idx = |x: usize, y: usize, z: usize| -> usize { z * nx * ny + y * nx + x };
+
+        // S field sponge: CPML only absorbs Q; S uses a standard Laplacian so
+        // sponge damping is needed to prevent S reflections at the PML faces.
+        apply_s_sponge_on_grid(&mut grid, &config, nx, ny, nz, &idx);
 
         apply_conducting(&mut grid.cells[cur], &config, nx, ny, nz, &idx);
         apply_periodic(&mut grid.cells[cur], &config, nx, ny, nz, &idx);
@@ -655,6 +818,51 @@ fn apply_pml_face_extrapolation(grid: &mut SimulationGrid, config: &BoundaryConf
         for y in 0..ny {
             for x in 0..nx {
                 buf[idx(x, y, nz - 1)] = buf[idx(x, y, nz - 2)];
+            }
+        }
+    }
+
+    // --- S field face extrapolation (zero-order Neumann) ---
+    let s_buf = &mut grid.s_field[cur];
+    if config.neg_x == BoundaryType::Open {
+        for z in 0..nz {
+            for y in 0..ny {
+                s_buf[idx(0, y, z)] = s_buf[idx(1, y, z)];
+            }
+        }
+    }
+    if config.pos_x == BoundaryType::Open {
+        for z in 0..nz {
+            for y in 0..ny {
+                s_buf[idx(nx - 1, y, z)] = s_buf[idx(nx - 2, y, z)];
+            }
+        }
+    }
+    if config.neg_y == BoundaryType::Open {
+        for z in 0..nz {
+            for x in 0..nx {
+                s_buf[idx(x, 0, z)] = s_buf[idx(x, 1, z)];
+            }
+        }
+    }
+    if config.pos_y == BoundaryType::Open {
+        for z in 0..nz {
+            for x in 0..nx {
+                s_buf[idx(x, ny - 1, z)] = s_buf[idx(x, ny - 2, z)];
+            }
+        }
+    }
+    if config.neg_z == BoundaryType::Open {
+        for y in 0..ny {
+            for x in 0..nx {
+                s_buf[idx(x, y, 0)] = s_buf[idx(x, y, 1)];
+            }
+        }
+    }
+    if config.pos_z == BoundaryType::Open {
+        for y in 0..ny {
+            for x in 0..nx {
+                s_buf[idx(x, y, nz - 1)] = s_buf[idx(x, y, nz - 2)];
             }
         }
     }
@@ -826,7 +1034,7 @@ mod tests {
     }
 
     #[test]
-    fn test_periodic_averages_faces() {
+    fn test_periodic_swaps_faces() {
         let mut grid = SimulationGrid::new(8, 8, 8, 0.01);
         let dt = grid.dt;
         let config = BoundaryConfig {
@@ -844,12 +1052,17 @@ mod tests {
 
         apply_boundaries(&mut grid, &config, dt);
 
+        // Swap semantics: each face gets the other face's original value.
         let lo = grid.cell(0, y, z).q[0];
         let hi = grid.cell(7, y, z).q[0];
         assert!(
-            (lo - hi).abs() < 1e-6,
-            "periodic faces should be equal: lo={}, hi={}",
-            lo,
+            (lo - 6.0).abs() < 1e-6,
+            "lo face should have original hi value (6.0): got {}",
+            lo
+        );
+        assert!(
+            (hi - 2.0).abs() < 1e-6,
+            "hi face should have original lo value (2.0): got {}",
             hi
         );
     }

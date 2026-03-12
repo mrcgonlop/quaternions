@@ -4,8 +4,11 @@
 use bevy::prelude::*;
 
 use crate::simulation::plugin::SimulationSet;
+use crate::visualization::geometry::{self, GeometryConfig};
 use crate::visualization::glyphs::{self, GlyphConfig};
+use crate::visualization::isosurface::{self, IsosurfaceConfig};
 use crate::visualization::slices::{self, AllSliceStats, SliceConfigs};
+use crate::visualization::streamlines::{self, StreamlineConfig};
 
 pub struct VisualizationPlugin;
 
@@ -14,6 +17,9 @@ impl Plugin for VisualizationPlugin {
         app.init_resource::<SliceConfigs>()
             .init_resource::<AllSliceStats>()
             .init_resource::<GlyphConfig>()
+            .init_resource::<StreamlineConfig>()
+            .init_resource::<IsosurfaceConfig>()
+            .init_resource::<GeometryConfig>()
             .add_systems(
                 Update,
                 (
@@ -25,6 +31,9 @@ impl Plugin for VisualizationPlugin {
                     slices::update_slice_texture,
                     slices::update_slice_transform,
                     glyphs::draw_glyph_arrows,
+                    streamlines::draw_streamlines,
+                    isosurface::draw_isosurface,
+                    geometry::draw_geometry,
                 )
                     .chain()
                     .after(SimulationSet),

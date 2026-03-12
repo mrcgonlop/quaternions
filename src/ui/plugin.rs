@@ -39,6 +39,7 @@ fn ui_side_panel(
     diagnostics: Res<DiagnosticsStore>,
     mut sources: ResMut<SourceConfig>,
     mut selected_scenario: ResMut<SelectedScenario>,
+    mut pml: Option<ResMut<crate::simulation::boundaries::PmlState>>,
 ) {
     let ctx = contexts.ctx_mut();
 
@@ -56,14 +57,15 @@ fn ui_side_panel(
                     config.paused = !config.paused;
                 }
                 if ui.button("Step").clicked() {
-                    // Single-step: unpause for one frame, then re-pause
-                    // (handled by the simulation step system checking a one-shot flag)
-                    config.paused = false;
-                    // TODO: implement single-step logic in simulation_step_system
+                    config.step_requested = true;
                 }
                 if ui.button("Reset").clicked() {
                     if let Some(ref mut grid) = grid {
                         grid.reset();
+                    }
+                    // Clear stale CPML auxiliary fields so the new run starts clean.
+                    if let Some(ref mut pml_state) = pml {
+                        pml_state.reset_psi();
                     }
                     sources.sources.clear();
                     selected_scenario.current = None;
@@ -177,11 +179,15 @@ fn ui_side_panel(
                             .clicked()
                         {
                             selected_scenario.current = Some(scenario);
-                            // Apply scenario configuration
+                            // Apply scenario configuration; grid.reset() inside preserves
+                            // PML flags, but stale CPML psi must be zeroed separately.
                             if let Some(ref mut grid) = grid {
                                 match scenario {
                                     Scenario::DipoleRadiation => {
                                         dipole_radiation::apply_dipole_scenario(grid, &mut sources);
+                                        if let Some(ref mut pml_state) = pml {
+                                            pml_state.reset_psi();
+                                        }
                                         config.paused = true;
                                     }
                                 }

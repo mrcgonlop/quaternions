@@ -34,6 +34,14 @@ pub struct SimulationGrid {
 
     /// Step count.
     pub iteration: u64,
+
+    /// Dynamical S field, double-buffered (same indexing as `cells`).
+    /// S evolves via □S = 0 in extended mode; stays zero in standard mode.
+    /// Read from `s_field[current]`, write to `s_field[1 - current]`; flipped by `current` swap.
+    pub s_field: [Vec<f32>; 2],
+
+    /// ∂S/∂t at half-step offsets for Störmer-Verlet leapfrog (same stagger as q_dot).
+    pub s_dot: Vec<f32>,
 }
 
 impl SimulationGrid {
@@ -57,6 +65,8 @@ impl SimulationGrid {
             current: 0,
             time: 0.0,
             iteration: 0,
+            s_field: [vec![0.0; n], vec![0.0; n]],
+            s_dot: vec![0.0; n],
         }
     }
 
@@ -107,6 +117,12 @@ impl SimulationGrid {
         &self.cells[self.current]
     }
 
+    /// Reference to the current S field read buffer.
+    #[inline]
+    pub fn s_read(&self) -> &[f32] {
+        &self.s_field[self.current]
+    }
+
     /// Reference to the write buffer (opposite of current).
     #[inline]
     pub fn write_buf(&self) -> &[CellState] {
@@ -135,39 +151,56 @@ impl SimulationGrid {
 
     /// Build a SimParams snapshot of current grid state.
     pub fn sim_params(&self, extended_mode: bool) -> SimParams {
-        SimParams::new(
+        let mut p = SimParams::new(
             self.nx,
             self.ny,
             self.nz,
             self.dx,
             self.dt,
             extended_mode,
-        )
+        );
+        p.time = self.time as f32;
+        p.iteration = self.iteration as u32;
+        p
     }
 
     /// Reset the grid to vacuum: zero all fields, reset time and iteration.
+    ///
+    /// PML flags (`CellFlags::PML`) are preserved because the PML geometry is
+    /// determined by the grid size and boundary config, not by scenario content.
+    /// Losing these flags would disable CPML absorption and cause divergence.
     pub fn reset(&mut self) {
         for cell in self.cells[0].iter_mut() {
+            let pml_flag = cell.flags & crate::simulation::state::CellFlags::PML;
             *cell = CellState::vacuum();
+            cell.flags = pml_flag;
         }
         for cell in self.cells[1].iter_mut() {
+            let pml_flag = cell.flags & crate::simulation::state::CellFlags::PML;
             *cell = CellState::vacuum();
+            cell.flags = pml_flag;
         }
         self.current = 0;
         self.time = 0.0;
         self.iteration = 0;
+        self.s_field[0].fill(0.0);
+        self.s_field[1].fill(0.0);
+        self.s_dot.fill(0.0);
     }
 
     /// Build a SimParams snapshot with a custom dt (for dt_factor scaling).
     pub fn sim_params_with_dt(&self, extended_mode: bool, dt: f32) -> SimParams {
-        SimParams::new(
+        let mut p = SimParams::new(
             self.nx,
             self.ny,
             self.nz,
             self.dx,
             dt,
             extended_mode,
-        )
+        );
+        p.time = self.time as f32;
+        p.iteration = self.iteration as u32;
+        p
     }
 }
 

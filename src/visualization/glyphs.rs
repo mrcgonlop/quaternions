@@ -209,8 +209,8 @@ pub fn draw_glyph_arrows(
     let nz = grid.nz as usize;
     let stride = config.stride.max(1) as usize;
 
-    // First pass: collect samples and magnitudes for auto-ranging
-    let mut samples: Vec<(usize, usize, usize, usize, f32)> = Vec::new();
+    // First pass: collect samples, vectors, and magnitudes for auto-ranging
+    let mut samples: Vec<(usize, usize, usize, usize, [f32; 3], f32)> = Vec::new();
 
     for z in (0..nz).step_by(stride) {
         for y in (0..ny).step_by(stride) {
@@ -218,7 +218,7 @@ pub fn draw_glyph_arrows(
                 let idx = fdtd::idx(x, y, z, nx, ny);
                 let vec = sample_vector_at(&grid, &diag, idx, config.field);
                 let mag = (vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2]).sqrt();
-                samples.push((x, y, z, idx, mag));
+                samples.push((x, y, z, idx, vec, mag));
             }
         }
     }
@@ -226,7 +226,7 @@ pub fn draw_glyph_arrows(
     let max_mag = if config.auto_range {
         samples
             .iter()
-            .map(|&(_, _, _, _, m)| m)
+            .map(|&(_, _, _, _, _, m)| m)
             .fold(0.0f32, f32::max)
             .max(1e-6)
     } else {
@@ -239,12 +239,11 @@ pub fn draw_glyph_arrows(
     };
 
     // Second pass: draw arrows
-    for &(x, y, z, idx, mag) in &samples {
+    for &(x, y, z, idx, vec, mag) in &samples {
         if mag < max_mag * 1e-4 {
             continue;
         }
 
-        let vec = sample_vector_at(&grid, &diag, idx, config.field);
         let dir = Vec3::new(vec[0], vec[1], vec[2]) / mag;
         let pos = grid_to_world(x, y, z, &grid);
 

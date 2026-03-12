@@ -470,20 +470,11 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
 ### 3.4 — Force visualization overlays
 - **Context:** `src/simulation/diagnostics.rs` (DerivedFields with E, B, Poynting), `src/visualization/color_maps.rs`, `src/simulation/grid.rs` (grid sampling), `ARCHITECTURE.md §Visualization Modes` (lines 396–406, glyph/arrow overview)
 - **Depends on:** 1.3, 0.6
-- `[ ]` Implement `src/visualization/glyphs.rs`:
-  - Arrow mesh generation: cone + cylinder
-  - `GlyphField` component: which vector field to display, sampling density, scale factor
-  - Bevy system: sample vector field on a subgrid, spawn/update instanced arrow meshes
-  - Color arrows by magnitude using selected color map
-  - Fields to support: E, B, A (vector potential), Poynting, Weber force, Lorentz force
-  - `// PSEUDOCODE: For each sample point (x,y,z) on the subgrid:`
-  - `// 1. Read vector field value V at (x,y,z)`
-  - `// 2. Compute arrow length = |V| * scale_factor`
-  - `// 3. Compute arrow orientation = V / |V|`
-  - `// 4. Compute arrow color = color_map(|V|, min_val, max_val)`
-  - `// 5. Set instance transform: translate to (x,y,z), rotate to align with V, scale by length`
-- `[ ]` Add to UI: field selector, density slider, scale slider, on/off toggle
-- `[ ]` Verify: dipole scenario shows correct E field arrows radiating outward
+- `[x]` Implement `src/visualization/glyphs.rs`:
+  - Implemented via gizmos (not instanced mesh arrows). Supports E, B, Poynting, A with
+    Standard/RgbMultiField/HsvPhase/SizeColor encoding modes. Arrowhead drawn as two lines.
+- `[x]` Add to UI: field selector, density slider, scale slider, on/off toggle
+- `[x]` Verify: dipole scenario shows correct E field arrows radiating outward
 - **Session output**: Beautiful vector field visualization in 3D
 
 ---
@@ -666,7 +657,8 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
 ### 6.2 — Streamlines
 - **Context:** `src/simulation/diagnostics.rs` (DerivedFields for E, B vector data), `src/simulation/grid.rs` (trilinear interpolation needed), `ARCHITECTURE.md §Visualization Modes` (lines 397–400, streamline description)
 - **Depends on:** 1.3
-- `[ ]` Implement `src/visualization/streamlines.rs`:
+- `[~]` Implement `src/visualization/streamlines.rs`:
+  - **Note:** Uses Euler integration (1st-order), not RK4. Functional for visualization; upgrade to RK4 if field-line accuracy matters.
   - `StreamlineConfig`: seed points, field to trace, integration steps, step size
   - `fn compute_streamlines(derived_fields, config) -> Vec<Vec<Vec3>>`:
     - From each seed point, integrate using 4th-order Runge-Kutta
@@ -690,7 +682,8 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
 ### 6.3 — Isosurface extraction
 - **Context:** `src/simulation/diagnostics.rs` (DerivedFields scalar data), `src/simulation/grid.rs` (grid dimensions for cell iteration)
 - **Depends on:** 1.3
-- `[ ]` Implement `src/visualization/isosurface.rs`:
+- `[~]` Implement `src/visualization/isosurface.rs`:
+  - **Note:** Uses voxelized boundary faces (staircase surface), not marching cubes. No lookup tables required. Upgrade to MC for smooth surfaces if needed.
   - Marching cubes algorithm on the 3D field data
   - `fn marching_cubes(field_data, threshold, grid) -> Mesh`:
     - Standard 256-entry lookup table for cube configurations
