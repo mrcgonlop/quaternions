@@ -288,6 +288,95 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
 - `[x]` Verify: visually confirm dipole radiation pattern in slice view
 - **Session output**: Validated baseline — standard FDTD is correct before extending it
 
+### 1.8 — Dynamic K field: polarizable vacuum evolution
+- **Context:** `src/simulation/grid.rs` (CellState fields `k`, `k_dot`), `src/simulation/field_update.rs` (step_field_cpu leapfrog pattern), `src/simulation/state.rs` (SimParams, CellFlags), `src/simulation/diagnostics.rs` (diagnostics pattern), `README.md §3.4` (K field physics and the virtual pair plasma model)
+- **Depends on:** 1.3, 2.1 (extended mode), Phase 1.7 (independent S field)
+- **Physics summary:** The QED vacuum acts as a polarizable medium (refractive index n = √K ≥ 1). Strong local fields excite virtual e⁺e⁻ pairs, increasing K above its vacuum value K₀=1. K evolves as a damped scalar wave: `∂²K/∂t² = c²∇²K − ωₚ²(K − 1) + η · u_field/u_S` where ωₚ = mₑc²/ℏ ≈ 7.8×10²⁰ rad/s is the Compton frequency (vacuum plasma frequency), η ≈ 2α/(45π) ≈ 10⁻⁴ is the QED coupling (Euler-Heisenberg), and u_S = ε₀(mₑc²/e)² is a characteristic field energy density. In simulation units, ωₚ and η are free parameters in `VacuumConfig`.
+- **Weber + K enhancement:** Weber corrections scale as K²(v/c₀)². For K > √2, like-charge attraction threshold shifts from v > c₀√2 (superluminal) to v < c₀ (sub-relativistic), enabling stable electron clusters (EVOs/charge clusters) as self-sustaining K pockets.
+
+#### Implementation tasks:
+
+- `[ ]` Add `VacuumConfig` to `src/simulation/plugin.rs`:
+  ```rust
+  #[derive(Resource, Clone, Debug)]
+  pub struct VacuumConfig {
+      pub enabled: bool,        // master switch
+      pub omega_p: f32,         // vacuum plasma frequency (rad/s, in sim units)
+      pub eta: f32,             // QED coupling ≈ 2α/(45π) ≈ 1e-4
+      pub u_s: f32,             // characteristic energy density (normalization)
+  }
+  impl Default for VacuumConfig { fn default() -> Self { Self { enabled: false, omega_p: 0.0, eta: 1e-4, u_s: 1.0 } } }
+  ```
+- `[ ]` Add K leapfrog to `step_field_cpu` in `src/simulation/field_update.rs`:
+  - Pre-pass: compute `lap_k[i]` = 6-neighbor Laplacian of `cell.k`
+  - Update k_dot: `k_dot[i] += dt * (c² * lap_k[i] - omega_p² * (k[i] - 1.0) + eta * u_field[i] / u_s)`
+    - `u_field[i]` = local energy density from derived fields (0.5ε₀E² + 0.5/μ₀ B²)
+    - Guard: only update if `vacuum_config.enabled && is_interior && !is_pml`
+  - Update k: `k_new[i] = k_old[i] + dt * k_dot[i]`; clamp `k_new[i] >= 1.0`
+  - `c_local` = `c0 / k[i]` propagates automatically since `field_update` already reads `cell.k`
+- `[ ]` Add K Neumann boundary conditions in `src/simulation/boundaries.rs`:
+  - `apply_k_neumann`: zero-gradient at all 6 open faces (`k[boundary] = k[interior_neighbor]`)
+  - Called from `apply_boundaries` and from the PML path in `boundary_system`
+- `[ ]` Add K visualization to `src/visualization/slices.rs`:
+  - New `FieldQuantity::VacuumK` variant
+  - Map `cell.k` (range 1.0 to ~3.0) to colormap (show departures from K=1 as neutral color)
+  - Add toggle to UI alongside E/B/S slice modes
+- `[ ]` Add K diagnostics to `src/simulation/diagnostics.rs`:
+  - `DiagnosticsState` gains `max_k: f32` and `mean_k: f32`
+  - `max_k` and `mean_k` computed over all non-PML interior cells in `diagnostics_system`
+  - Displayed in UI panel next to E, B, S diagnostics
+- `[ ]` Write tests in `tests/integration_phase1.rs`:
+  - `test_k_vacuum_stable`: grid with K=1, no fields → K remains 1.0 after 1000 steps
+  - `test_k_increases_with_field`: strong E field applied → K increases above 1.0 within expected timescale
+  - `test_k_restores_after_pulse`: after pulse removed, K decays back toward 1.0 (via ωₚ² restoring term)
+  - `test_weber_k_enhancement`: with K > √2 in a cell, Weber force sign flips for like charges at sub-c velocity
+- `[ ]` Add `VacuumK` scenario to demonstrate EVO formation:
+  - Scenario: dense charge cluster at center, `vacuum_config.enabled = true`, `omega_p` set to ~c/100 (simulation scale)
+  - Expected: K grows in the high-field region, cluster remains stable longer than in K=1 case
+- **Session output**: Polarizable vacuum model active — K field evolves under field pressure, enabling Weber-enhanced charge clustering and measurable refractive-index gradients
+
+### 1.9 — Topological charge diagnostic (Hopf invariant / Baryon number)
+- **Context:** `src/simulation/grid.rs` (CellState: Q field `w, x, y, z` components), `src/simulation/diagnostics.rs` (DiagnosticsState pattern, diagnostics_system), `src/ui/plugin.rs` (UI panel for new diagnostic value), `README.md §3.5` (topological charge formula, Q field S³ topology)
+- **Depends on:** 1.3 (Q field exists in grid), 2.1 (extended mode where Q topology matters)
+- **Physics summary:** Unit quaternions live on S³. The map U = Q/|Q| : R³ → S³ is classified by π₃(S³) = ℤ — an integer winding number called the Skyrmion / Baryon number. A Hopfion has Hopf invariant Q_H = linking number of field line pairs, related to but distinct from the Baryon number (it classifies maps R³ → S² via the Hopf fibration S³ → S²). Both are integer topological invariants that must be conserved under smooth field evolution. Non-zero values indicate topologically stable configurations (ball lightning candidates). The Baryon charge density is:
+  ```
+  ρ_topo = (1/24π²) ε^{ijk} Tr( ∂_i U U⁻¹ · ∂_j U U⁻¹ · ∂_k U U⁻¹ )
+  ```
+  where U ∈ S³ is the unit quaternion, treated as a 2×2 complex matrix (or directly as the quaternion algebra). The integral ∫ ρ_topo dV = n ∈ ℤ.
+
+#### Implementation tasks:
+
+- `[ ]` Add `compute_topological_charge` to `src/simulation/diagnostics.rs`:
+  ```rust
+  pub fn compute_topological_charge(grid: &SimulationGrid) -> f32 {
+      // PSEUDOCODE:
+      // For each interior cell i:
+      //   U_i = Q_i / |Q_i|  (unit quaternion, Q_i.normalize())
+      //   Compute ∂_x U, ∂_y U, ∂_z U using central differences on unit quaternion field
+      //   Compute L_x = (∂_x U) * U.conjugate(), L_y = (∂_y U) * U.conjugate(), L_z = (∂_z U) * U.conjugate()
+      //     (these are Lie algebra elements: quaternions with zero scalar part)
+      //   ρ_topo[i] = (1/24π²) * (εijk triple product of L_x, L_y, L_z)
+      //     = (1/24π²) * scalar_part(L_x * (L_y * L_z - L_z * L_y))  (quaternion commutator trace)
+      //   Accumulate: charge += ρ_topo[i] * dx^3
+      // Return: total charge (should be near integer in a topological configuration)
+      todo!()
+  }
+  ```
+  - Guard: skip cells where |Q| < epsilon (vacuum or near-zero field)
+  - Guard: skip PML cells
+  - Result: real-valued output that rounds to an integer for true topological configurations
+
+- `[ ]` Add `topological_charge: f32` to `DiagnosticsState`
+- `[ ]` Call `compute_topological_charge` in `diagnostics_system` (every N steps, expensive — throttle to every 10 steps)
+- `[ ]` Display `n_topo` in UI panel (formatted as float with 2 decimal places: "Topo charge: {:.2}")
+  - Highlight if `|n_topo.round() - n_topo| < 0.1` → near-integer → topological structure detected
+- `[ ]` Write tests in `tests/integration_phase1.rs`:
+  - `test_topo_charge_vacuum`: uniform Q field → topological charge = 0
+  - `test_topo_charge_hedgehog`: hedgehog configuration Q ∝ (1, x/r, y/r, z/r)/r → topological charge = ±1
+  - `test_topo_charge_smooth_field`: slowly varying Q → charge ≈ 0 (no windings)
+  - `test_topo_charge_conserved`: evolve a non-trivial Q configuration 100 steps; charge changes by < 0.1
+- **Session output**: Integer-valued diagnostic detecting topological field structures — the essential measurement tool for ball lightning simulation
+
 ---
 
 ## Phase 2: Extended Electrodynamics (Scalar Field)
@@ -792,6 +881,144 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
   - Full implementation deferred until framework is validated
 - **Session output**: Roadmap stubs for all speculative experiments
 
+### 7.5 — Hopfion / ball lightning scenario
+- **Context:** `src/simulation/grid.rs` (Q field, K field layout), `src/simulation/diagnostics.rs` (topological charge diagnostic from Phase 1.9), `src/simulation/field_update.rs` (leapfrog, K dynamics from Phase 1.8), `README.md §3.5` (Hopfion theory, topological charge formula, ball lightning model)
+- **Depends on:** 1.8 (K dynamics), 1.9 (topological charge), 2.1 (extended mode)
+- **Physics summary:** The Irvine-Bouwmeester Hopfion is an exact Maxwell solution with Hopf-linked E and B field lines. In linear EM it disperses at speed c. In the (Q,K) system, K > 1 provides a dynamical Skyrme term that can sustain the topology. This scenario tests the critical K threshold for stable vs. dispersing Hopfion configurations.
+
+#### Implementation tasks:
+
+- `[ ]` Implement `src/scenarios/hopfion_ball_lightning.rs`:
+  - `fn setup_hopfion_initial_condition(grid: &mut SimulationGrid, radius: f32)`:
+    - Initialize Q field as the Rañada-Irvine Hopfion solution: Q components constructed from Bateman dual field
+    - `// PSEUDOCODE: The Irvine-Bouwmeester Hopfion in normalized coordinates:`
+    - `// φ + i·Ax = (AX + i) / (r² + 1)`
+    - `// Ay + i·Az = (AY + i·AZ) / (r² + 1)`
+    - `// where AX, AY, AZ are components of the Bateman potential, r is normalized radius`
+    - `// Full expression: use stereographic projection from S³`
+    - Simpler approach for stub: initialize as superposition of two orthogonal toroidal modes
+      with phase offset π/2 (creates Hopf linking to first order)
+    - Set K = 1.0 everywhere initially; K will self-organize if the mechanism is active
+  - `fn setup_toroidal_discharge(grid: &mut SimulationGrid, sources: &mut SourceConfig, R: f32, r: f32, n_turns: u32, winding_angle_deg: f32, peak_current: f32)`:
+    - Model the physical discharge geometry: helical winding at `winding_angle_deg` (~45°) on torus
+    - Source cells along the (1,1) torus knot curve
+    - Current envelope: Gaussian pulse with rise time τ = π√(LC), peak at t=0, decay τ
+    - `// PSEUDOCODE: For each winding turn k in 0..n_turns:`
+    - `// θ_tor = 2π k / n_turns`
+    - `// For each azimuthal step φ in 0..N_phi:`
+    - `//   Point on helical torus: x = (R + r cos(φ + θ_tor tan(angle))) cos(θ_tor)`
+    - `//   y = (R + r cos(φ + θ_tor tan(angle))) sin(θ_tor)`
+    - `//   z = r sin(φ + θ_tor tan(angle))`
+    - `//   Current direction: tangent to helix path`
+    - `//   Inject current via J source at nearest grid cell`
+  - `fn validate_hopfion_stability(derived: &[DerivedFields], topo_charge: f32, time: f32) -> bool`:
+    - Returns true if |topo_charge - topo_charge_initial| < 0.1 (topology conserved)
+    - Returns false if EM energy decayed to < 10% of initial (Hopfion dispersed)
+  - Parameter sweep: run scenario at different η values (0, 1e-6, 1e-4, 1e-2) to find critical η
+  - Expected: below critical η, Hopfion disperses in τ = R/c; above, topological charge persists
+
+- `[ ]` Add to scenario selector with separate panels:
+  - Option A: Irvine-Bouwmeester analytic IC (pure Hopfion, tests K sustaining in isolation)
+  - Option B: Physical discharge IC (tests whether the torus-knot discharge creates Hopf topology)
+
+- `[ ]` Visualization additions specific to this scenario:
+  - Field line tracer: show 3D streamlines of **B** colored by linking number with **E** lines
+  - K-field slice in XZ plane (shows toroidal K > 1 shell)
+  - Topological charge vs. time plot (time-series in UI panel)
+
+- **Session output**: Quantitative prediction of critical K threshold for stable ball lightning analog; parameter map for physical discharge experiment
+
+### 7.6 — K-cycle resonator scenario
+- **Context:** `src/simulation/field_update.rs` (K leapfrog from Phase 1.8), `src/simulation/sources.rs` (source API), `src/simulation/diagnostics.rs` (energy tracking), `README.md §3.4` (K field dynamics, virtual pair plasma)
+- **Depends on:** 1.8 (K dynamics)
+- **Physics summary:** If K is dynamically switchable (via a pulsed discharge that rapidly changes the local field energy density), non-adiabatic switching near ωₚ produces real photons from the virtual pair plasma (dynamical Casimir effect). A resonator that cycles K between K_low and K_high at frequency ωₚ_eff could sustain photon production as long as the input energy exceeds the net photon emission. This is NOT claimed energy extraction (that would require input < output) — the simulation tests whether coherent K cycling produces a detectable photon mode population distinct from thermalization.
+
+#### Implementation tasks:
+
+- `[ ]` Implement `src/scenarios/k_cycle_resonator.rs`:
+  - `fn setup_k_cycle_resonator(grid, resonator_radius: f32, drive_freq: f32, drive_amplitude: f32)`:
+    - Initialize: spherical K > 1 shell of radius `resonator_radius`
+    - Drive: add sinusoidal source term to K equation at `drive_freq` in the shell
+    - `// PSEUDOCODE: inject external K drive by adding oscillating term to k_dot:`
+    - `// k_dot[i] += drive_amplitude * sin(2π * drive_freq * t)  for r < resonator_radius`
+    - `// This models a rapidly switched EM source modulating local K`
+    - Monitor: track EM energy inside and outside shell separately
+    - Look for: resonant energy buildup in specific EM modes at 2ω_drive (parametric amplification signature)
+    - Control: run without K coupling (η = 0) to establish baseline
+  - Parameter sweep: vary `drive_freq / omega_p` from 0.1 to 2.0 looking for resonant response
+  - Expected: parametric resonance if `drive_freq ≈ omega_p_eff / 2` (half-frequency drive for parametric amplification)
+  - Note: does NOT claim net energy gain — tests for non-thermal EM mode excitation signature
+
+- `[ ]` Add to scenario selector
+- **Session output**: Test of K-resonance mechanism; parametric amplification signature in specific EM modes
+
+### 7.7 — Spheromak / Taylor relaxation with dynamic K (fusion confinement connection)
+- **Context:** `src/simulation/field_update.rs` (K dynamics from Phase 1.8), `src/simulation/sources.rs` (current source API), `src/simulation/diagnostics.rs` (topological charge from Phase 1.9, energy diagnostics), `README.md §3.7–§3.9` (magnetic helicity, Taylor relaxation, K-modified confinement physics)
+- **Depends on:** 1.8 (K dynamics), 1.9 (topological charge), 3.1 (particle system for plasma current model)
+- **Physics summary:** The spheromak is the minimum-energy state of a plasma at fixed magnetic helicity H_mag = ∫ A·B dV. Standard MHD Taylor relaxation finds this state with K=1. With dynamic K, the minimum-energy state at fixed helicity shifts — the K gradient contributes to the force balance, potentially modifying the confinement geometry and introducing a photon-reflecting K-boundary that standard MHD cannot model. The magnetic helicity H_mag is the classical analogue of the topological charge from Phase 1.9 and should be monitored alongside it. See README §3.9 for the full argument connecting plasma-K (effective dielectric) to vacuum-K and the unexplored fusion confinement implications.
+
+#### Implementation tasks:
+
+- `[ ]` Add `compute_magnetic_helicity` to `src/simulation/diagnostics.rs`:
+  ```rust
+  pub fn compute_magnetic_helicity(grid: &SimulationGrid) -> f32 {
+      // PSEUDOCODE:
+      // H_mag = ∫ A · B dV  where A = vector potential = (Ax, Ay, Az) from Q.x, Q.y, Q.z
+      // and B = curl(A) computed via the existing curl_vector helper
+      // For each interior cell i:
+      //   A_i = [grid.cells[c][i].q_x, q_y, q_z]
+      //   B_i = derived_fields[i].b  (already computed by diagnostics_system)
+      //   helicity += dot(A_i, B_i) * dx^3
+      // Return: total magnetic helicity (conserved in ideal MHD = conserved in standard mode)
+      // In extended QVED mode, helicity may not be strictly conserved — the divergence
+      // measures how much the S field is injecting or draining helicity
+      todo!()
+  }
+  ```
+  - Add `magnetic_helicity: f32` to `DiagnosticsState`
+  - Display in UI: "H_mag: {:.4e}"
+  - In extended mode: compare helicity change rate to S field source term; this is the QVED prediction
+
+- `[ ]` Implement `src/scenarios/spheromak_taylor.rs`:
+  - `fn setup_spheromak_ic(grid: &mut SimulationGrid, radius: f32, helicity: f32)`:
+    - Initialize Q field as the lowest-order spheromak eigenmode: ∇×B = λ·B (force-free field)
+    - The spheromak eigenmode has B = B_tor + B_pol with equal amplitudes inside radius R
+    - `// PSEUDOCODE: Spheromak field in spherical coordinates (lowest Chandrasekhar-Kendall mode):`
+    - `// B_r = (2/r²) · j_1(λr) · cos(θ)  (j_1 = spherical Bessel function of order 1)`
+    - `// B_θ = -(1/r) · d/dr[r·j_1(λr)] · sin(θ)`
+    - `// B_φ = λ · j_1(λr) · sin(θ)  (this is the toroidal component)`
+    - `// where λ = 4.49/R (first zero of j_1 sets the confinement radius)`
+    - Use grid interpolation to set Q.x, Q.y, Q.z from this analytical field
+    - Set K = 1.0 everywhere initially; let K self-organize
+  - `fn run_taylor_relaxation(steps: usize)`:
+    - Evolve from a turbulent initial condition (spheromak IC plus random perturbation)
+    - Monitor: does the field relax toward the spheromak eigenmode (Taylor state)?
+    - Monitor: does H_mag stay constant? (Test of helicity conservation)
+    - Monitor: does the K field develop a self-consistent profile?
+  - Two runs to compare:
+    - Run A: K=1 fixed (standard MHD Taylor relaxation — should find standard spheromak)
+    - Run B: K dynamic (QVED — does the relaxed state differ from standard? Is H_mag conserved differently?)
+  - Diagnostic: plot K(r) at the relaxed state — look for K > 1 shell at the plasma boundary
+  - This K-boundary prediction is the novel fusion physics result: a K-gradient confinement layer
+    that has no analogue in standard MHD and could supplement magnetic pressure confinement
+
+- `[ ]` Add magnetic helicity injection source:
+  - `fn inject_helicity(grid, sources, coaxial_gun_axis, gun_current)`:
+    - Model the coaxial gun as current flowing along the axis with azimuthal return current
+    - The J×B force on the plasma injects helicity at rate dH/dt = 2 ∫ E·B dV
+    - `// PSEUDOCODE: coaxial gun helicity injection rate:`
+    - `// dH/dt = 2 V_gun · Φ_gun  where V_gun = gun voltage, Φ_gun = gun magnetic flux`
+    - `// This is the Woltjer-Taylor helicity injection formula`
+    - `// In simulation: inject current source at one face, drain at opposite face`
+    - `// The resulting E (from ∂A/∂t) crossed with B_gun gives dH/dt`
+
+- `[ ]` Write tests:
+  - `test_helicity_conserved_standard_mode`: run 1000 steps, H_mag drift < 1%
+  - `test_taylor_state_force_free`: after relaxation, verify ∇×B ≈ λ·B at interior cells
+  - `test_k_develops_boundary`: after K-dynamic Taylor run, K(r) > 1 at confinement radius
+
+- **Session output**: First simulation of fusion-relevant plasma topology with QVED corrections — prediction of K-gradient confinement layer and modified Taylor state geometry
+
 ---
 
 ## Phase 8: Data Export and Reproducibility
@@ -881,7 +1108,7 @@ These are non-blocking inconsistencies or scope questions to revisit as the rele
 ### Physics Scope Clarifications
 - **Casimir scenario (Phase 4.2):** The Casimir effect is fundamentally quantum (zero-point fluctuations). Our classical FDTD with random initial conditions is NOT equivalent to quantum vacuum. The simulation demonstrates the *mechanism* (boundary-constrained modes → K gradient → force) rather than producing quantitative Casimir predictions. The random initialization spectrum is artificial — document this clearly in the scenario.
 - **Aharonov-Bohm scenario (Phase 7.1):** The AB effect is quantum phase interference. Our simulation can demonstrate that A != 0 where B = 0 (purely classical potential structure) and compute path integrals of A, but it cannot simulate the actual electron wavefunction interference. Scope is "demonstrate potential structure and compute phase-relevant integrals," not "simulate the AB effect."
-- **S field as derived vs evolved:** The README states S obeys its own wave equation □S = -ρ/ε₀. In our implementation, S is NOT independently evolved — it is a *derived* quantity computed from Q at each step. The wave-like behavior of S emerges from the coupled Q evolution when extended mode is active. This is physically equivalent but numerically different from solving a separate S PDE. If numerical issues arise (S not propagating cleanly), consider adding explicit S evolution as an alternative.
+- **S field as derived vs evolved:** ~~RESOLVED~~ In the original Phase 1 stub, S was a derived quantity (Lorenz gauge formula). As of Phase 1.7, S is fully independently evolved via its own □S = 0 leapfrog in `field_update.rs`, stored in double-buffered `grid.s_field`, and read directly by `diagnostics.rs` in extended mode. This is true QVED (α=1.0) with no gauge constraint on S.
 
 ### Resolution & Scale
 - **Bifilar coil resolution:** A realistic bifilar coil has ~1mm wire spacing. At 64³ with 0.5m domain, dx ≈ 8mm — too coarse. Either use a fine grid (128³+ with small domain) or idealize the coil as a current sheet. Note this in the bifilar scenario setup.
