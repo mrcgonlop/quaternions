@@ -7,3 +7,4 @@ pub mod brown_capacitor;
 pub mod pulsed_circuit;
 pub mod charge_cluster;
 pub mod dipole_radiation;
+pub mod vacuum_k;

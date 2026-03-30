@@ -296,7 +296,7 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
 
 #### Implementation tasks:
 
-- `[ ]` Add `VacuumConfig` to `src/simulation/plugin.rs`:
+- `[x]` Add `VacuumConfig` to `src/simulation/plugin.rs`:
   ```rust
   #[derive(Resource, Clone, Debug)]
   pub struct VacuumConfig {
@@ -307,32 +307,30 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
   }
   impl Default for VacuumConfig { fn default() -> Self { Self { enabled: false, omega_p: 0.0, eta: 1e-4, u_s: 1.0 } } }
   ```
-- `[ ]` Add K leapfrog to `step_field_cpu` in `src/simulation/field_update.rs`:
+- `[x]` Add K leapfrog to `step_field_cpu` in `src/simulation/field_update.rs`:
   - Pre-pass: compute `lap_k[i]` = 6-neighbor Laplacian of `cell.k`
   - Update k_dot: `k_dot[i] += dt * (c² * lap_k[i] - omega_p² * (k[i] - 1.0) + eta * u_field[i] / u_s)`
     - `u_field[i]` = local energy density from derived fields (0.5ε₀E² + 0.5/μ₀ B²)
     - Guard: only update if `vacuum_config.enabled && is_interior && !is_pml`
   - Update k: `k_new[i] = k_old[i] + dt * k_dot[i]`; clamp `k_new[i] >= 1.0`
   - `c_local` = `c0 / k[i]` propagates automatically since `field_update` already reads `cell.k`
-- `[ ]` Add K Neumann boundary conditions in `src/simulation/boundaries.rs`:
+- `[x]` Add K Neumann boundary conditions in `src/simulation/boundaries.rs`:
   - `apply_k_neumann`: zero-gradient at all 6 open faces (`k[boundary] = k[interior_neighbor]`)
   - Called from `apply_boundaries` and from the PML path in `boundary_system`
-- `[ ]` Add K visualization to `src/visualization/slices.rs`:
-  - New `FieldQuantity::VacuumK` variant
-  - Map `cell.k` (range 1.0 to ~3.0) to colormap (show departures from K=1 as neutral color)
-  - Add toggle to UI alongside E/B/S slice modes
-- `[ ]` Add K diagnostics to `src/simulation/diagnostics.rs`:
+- `[x]` Add K visualization to `src/visualization/slices.rs`:
+  - `FieldQuantity::KVacuum` variant already existed; `sample_field_at` already reads `cell.k`
+- `[x]` Add K diagnostics to `src/simulation/diagnostics.rs`:
   - `DiagnosticsState` gains `max_k: f32` and `mean_k: f32`
   - `max_k` and `mean_k` computed over all non-PML interior cells in `diagnostics_system`
   - Displayed in UI panel next to E, B, S diagnostics
-- `[ ]` Write tests in `tests/integration_phase1.rs`:
-  - `test_k_vacuum_stable`: grid with K=1, no fields → K remains 1.0 after 1000 steps
-  - `test_k_increases_with_field`: strong E field applied → K increases above 1.0 within expected timescale
-  - `test_k_restores_after_pulse`: after pulse removed, K decays back toward 1.0 (via ωₚ² restoring term)
-  - `test_weber_k_enhancement`: with K > √2 in a cell, Weber force sign flips for like charges at sub-c velocity
-- `[ ]` Add `VacuumK` scenario to demonstrate EVO formation:
-  - Scenario: dense charge cluster at center, `vacuum_config.enabled = true`, `omega_p` set to ~c/100 (simulation scale)
-  - Expected: K grows in the high-field region, cluster remains stable longer than in K=1 case
+- `[x]` Write tests in `tests/integration_phase1.rs`:
+  - `test_k_vacuum_stable`: grid with K=1, no fields → K remains 1.0 after 1000 steps ✓
+  - `test_k_increases_with_field`: strong E field applied → K increases above 1.0 ✓
+  - `test_k_restores_after_pulse`: after pulse removed, K decays back toward 1.0 ✓
+  - `test_k_diagnostics_vacuum`: max_k/mean_k return 1.0 on vacuum grid ✓
+  - Note: `test_weber_k_enhancement` deferred — Weber force not yet implemented
+- `[x]` Add `VacuumK` scenario to demonstrate EVO formation:
+  - `src/scenarios/vacuum_k.rs` + `Scenario::VacuumK` in dipole_radiation.rs + UI handler
 - **Session output**: Polarizable vacuum model active — K field evolves under field pressure, enabling Weber-enhanced charge clustering and measurable refractive-index gradients
 
 ### 1.9 — Topological charge diagnostic (Hopf invariant / Baryon number)

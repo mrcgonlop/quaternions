@@ -38,7 +38,12 @@
 use crate::math::fdtd;
 use crate::simulation::boundaries::PmlState;
 use crate::simulation::grid::SimulationGrid;
+use crate::simulation::plugin::VacuumConfig;
 use crate::simulation::state::{CellFlags, SimParams};
+
+// Physical constants for K field energy density computation.
+const EPSILON_0_K: f32 = 8.854e-12; // F/m
+const INV_MU_0_K: f32 = 1.0 / 1.2566e-6; // 1/(H/m)
 
 /// Check if a cell has all 6 neighbors in the grid (not on the outermost face).
 #[inline]
@@ -55,6 +60,12 @@ fn has_neighbors(x: usize, y: usize, z: usize, nx: usize, ny: usize, nz: usize) 
 /// PML cells that have neighbors (not on the outermost grid face) are updated
 /// with CPML-corrected Laplacians rather than being skipped.
 ///
+/// When `vacuum` is Some and `vacuum.enabled`, the K field evolves via leapfrog:
+///   k_ddot = c_local² ∇²K − ωₚ²(K − 1) + η · u_field / u_s
+///   k_dot += k_ddot * dt
+///   k = max(k + k_dot * dt, 1.0)  (clamp to prevent sub-vacuum K)
+/// K is not updated in PML cells to avoid undermining CPML absorption.
+///
 /// # Algorithm (per cell)
 /// 1. Copy cell to write buffer
 /// 2. Skip if BOUNDARY flag or outermost face without neighbors
@@ -63,10 +74,12 @@ fn has_neighbors(x: usize, y: usize, z: usize, nx: usize, ny: usize, nz: usize) 
 /// 5. Sum to get Laplacian, compute q_ddot = c² * lap_Q
 /// 6. If extended_mode: add c·∂S/∂t to q_ddot[0], subtract c²·∇S from q_ddot[1..3]
 /// 7. Leapfrog: q_dot += q_ddot * dt, q += q_dot * dt
+/// 8. If vacuum enabled and non-PML: update k_dot and k via K leapfrog
 pub fn step_field_cpu(
     grid: &mut SimulationGrid,
     params: &SimParams,
     mut pml: Option<&mut PmlState>,
+    vacuum: Option<&VacuumConfig>,
 ) {
     let nx = params.nx as usize;
     let ny = params.ny as usize;
@@ -110,6 +123,65 @@ pub fn step_field_cpu(
         // `s` borrow is released here (lap_s owns a Vec, not a reference)
     } else {
         Vec::new()
+    };
+
+    // -------------------------------------------------------------------------
+    // Pre-pass: compute ∇²K(t) and u_field(t) for K leapfrog.
+    // Both are needed only when vacuum.enabled.
+    // u_field = 0.5*ε₀*|E|² + 0.5/μ₀*|B|²  (from Q and Q_dot via central diffs)
+    // -------------------------------------------------------------------------
+    let k_enabled = vacuum.map_or(false, |v| v.enabled);
+    let (lap_k, u_field_k): (Vec<f32>, Vec<f32>) = if k_enabled {
+        let rb = &grid.cells[grid.current];
+        let mut lap = vec![0.0f32; n_cells];
+        let mut u_fld = vec![0.0f32; n_cells];
+        for z in 0..nz {
+            for y in 0..ny {
+                for x in 0..nx {
+                    if !fdtd::is_interior(x, y, z, nx, ny, nz) {
+                        continue;
+                    }
+                    let i = fdtd::idx(x, y, z, nx, ny);
+                    let cell = &rb[i];
+
+                    // ∇²K via 6-neighbor central differences
+                    lap[i] = (rb[i + 1].k + rb[i - 1].k - 2.0 * cell.k) * inv_dx2
+                        + (rb[i + stride_y].k + rb[i - stride_y].k - 2.0 * cell.k) * inv_dx2
+                        + (rb[i + stride_z].k + rb[i - stride_z].k - 2.0 * cell.k) * inv_dx2;
+
+                    // Local speed: c₀/K
+                    let c_loc = c0 / cell.k;
+
+                    // E = -c_local * grad(Q.w) - Q_dot.xyz
+                    let ex = -c_loc * (rb[i + 1].q[0] - rb[i - 1].q[0]) * inv_2dx
+                        - cell.q_dot[1];
+                    let ey = -c_loc
+                        * (rb[i + stride_y].q[0] - rb[i - stride_y].q[0])
+                        * inv_2dx
+                        - cell.q_dot[2];
+                    let ez = -c_loc
+                        * (rb[i + stride_z].q[0] - rb[i - stride_z].q[0])
+                        * inv_2dx
+                        - cell.q_dot[3];
+
+                    // B = curl(A)
+                    let bx = (rb[i + stride_y].q[3] - rb[i - stride_y].q[3]) * inv_2dx
+                        - (rb[i + stride_z].q[2] - rb[i - stride_z].q[2]) * inv_2dx;
+                    let by = (rb[i + stride_z].q[1] - rb[i - stride_z].q[1]) * inv_2dx
+                        - (rb[i + 1].q[3] - rb[i - 1].q[3]) * inv_2dx;
+                    let bz = (rb[i + 1].q[2] - rb[i - 1].q[2]) * inv_2dx
+                        - (rb[i + stride_y].q[1] - rb[i - stride_y].q[1]) * inv_2dx;
+
+                    let e_sq = ex * ex + ey * ey + ez * ez;
+                    let b_sq = bx * bx + by * by + bz * bz;
+                    u_fld[i] = 0.5 * EPSILON_0_K * e_sq + 0.5 * INV_MU_0_K * b_sq;
+                }
+            }
+        }
+        // rb borrow released here
+        (lap, u_fld)
+    } else {
+        (Vec::new(), Vec::new())
     };
 
     let read = grid.current;
@@ -254,8 +326,26 @@ pub fn step_field_cpu(
                     out.q_dot[comp] = cell.q_dot[comp] + q_ddot[comp] * dt;
                     out.q[comp] = cell.q[comp] + out.q_dot[comp] * dt;
                 }
-                out.k = cell.k;
-                out.k_dot = cell.k_dot;
+                // --- K leapfrog (vacuum polarizability) ---
+                //
+                // ∂²K/∂t² = c_local² ∇²K − ωₚ²(K−1) + η · u_field / u_s
+                // Störmer-Verlet: k_dot += k_ddot * dt; k = max(k + k_dot * dt, 1.0)
+                //
+                // PML cells are excluded: K dynamics inside the PML would
+                // undermine CPML absorption (same reason as S coupling exclusion).
+                if k_enabled && !is_pml_cell {
+                    let v = vacuum.unwrap(); // safe: k_enabled implies vacuum is Some
+                    let omega_p_sq = v.omega_p * v.omega_p;
+                    let u_s = if v.u_s > 0.0 { v.u_s } else { 1.0 };
+                    let k_ddot = c_local_sq * lap_k[i]
+                        - omega_p_sq * (cell.k - 1.0)
+                        + v.eta * u_field_k[i] / u_s;
+                    out.k_dot = cell.k_dot + k_ddot * dt;
+                    out.k = (cell.k + out.k_dot * dt).max(1.0);
+                } else {
+                    out.k = cell.k;
+                    out.k_dot = cell.k_dot;
+                }
                 out.flags = cell.flags;
                 out._pad = cell._pad;
             }
@@ -336,7 +426,7 @@ mod tests {
         let mut grid = SimulationGrid::new(8, 8, 8, 0.01);
         let params = grid.sim_params(false);
 
-        step_field_cpu(&mut grid, &params, None);
+        step_field_cpu(&mut grid, &params, None, None);
         grid.swap_and_advance();
 
         // All cells should still be zero
@@ -359,7 +449,7 @@ mod tests {
 
         // Run a few steps
         for _ in 0..5 {
-            step_field_cpu(&mut grid, &params, None);
+            step_field_cpu(&mut grid, &params, None, None);
             grid.swap_and_advance();
         }
 
@@ -383,7 +473,7 @@ mod tests {
         let params = grid.sim_params(true); // extended_mode = true
 
         // Should not panic
-        step_field_cpu(&mut grid, &params, None);
+        step_field_cpu(&mut grid, &params, None, None);
         grid.swap_and_advance();
     }
 }

@@ -9,6 +9,39 @@ use crate::simulation::grid::SimulationGrid;
 use crate::simulation::sources::{self, SourceConfig};
 use crate::simulation::state::PmlConfig;
 
+/// Polarizable vacuum (K field) configuration.
+///
+/// Controls the dynamic K field that models QED vacuum polarization.
+/// When enabled, the vacuum refractive index K(x,t) evolves as a damped
+/// scalar wave driven by the local electromagnetic energy density:
+///   ∂²K/∂t² = c_local² ∇²K − ωₚ²(K − 1) + η · u_field / u_s
+/// where ωₚ is the vacuum plasma frequency, η is the QED coupling,
+/// and u_s is the characteristic energy normalization.
+#[derive(Resource, Clone, Debug)]
+pub struct VacuumConfig {
+    /// Master switch: set false to skip K update entirely (K stays constant).
+    pub enabled: bool,
+    /// Vacuum plasma frequency (rad/s in simulation units).
+    /// ωₚ = mₑc²/ℏ ≈ 7.8×10²⁰ rad/s in SI; use ~c/100 for visible simulation dynamics.
+    pub omega_p: f32,
+    /// QED coupling constant: η ≈ 2α/(45π) ≈ 1e-4 (Euler-Heisenberg).
+    pub eta: f32,
+    /// Characteristic energy density normalization u_s = ε₀(mₑc²/e)².
+    /// Prevents numerical overflow; default 1.0 means u_field is in code units.
+    pub u_s: f32,
+}
+
+impl Default for VacuumConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            omega_p: 0.0,
+            eta: 1e-4,
+            u_s: 1.0,
+        }
+    }
+}
+
 /// Configuration resource for the simulation.
 #[derive(Resource)]
 pub struct SimulationConfig {
@@ -64,6 +97,7 @@ impl Plugin for SimulationPlugin {
             .init_resource::<SourceConfig>()
             .init_resource::<DiagnosticsState>()
             .init_resource::<BoundaryConfig>()
+            .init_resource::<VacuumConfig>()
             .add_systems(Startup, init_grid)
             .add_systems(
                 Update,
@@ -117,6 +151,7 @@ fn simulation_step_system(
     grid: Option<ResMut<SimulationGrid>>,
     mut config: ResMut<SimulationConfig>,
     source_config: Res<SourceConfig>,
+    vacuum_config: Res<VacuumConfig>,
     pml: Option<ResMut<crate::simulation::boundaries::PmlState>>,
 ) {
     let Some(mut grid) = grid else { return };
@@ -133,7 +168,7 @@ fn simulation_step_system(
     for _ in 0..step_count {
         let params = grid.sim_params_with_dt(config.extended_mode, effective_dt);
         sources::inject_sources(&mut grid, &source_config, &params);
-        step_field_cpu(&mut grid, &params, pml.as_deref_mut());
+        step_field_cpu(&mut grid, &params, pml.as_deref_mut(), Some(&*vacuum_config));
         grid.swap_and_advance_with_dt(effective_dt);
     }
 

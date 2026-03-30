@@ -103,7 +103,7 @@ pub fn validate_dipole(
     for step in 0..num_steps {
         let params = grid.sim_params(extended_mode);
         inject_sources(grid, sources, &params);
-        step_field_cpu(grid, &params, None);
+        step_field_cpu(grid, &params, None, None);
         grid.swap_and_advance();
         apply_boundaries(grid, boundaries, dt);
 
@@ -293,14 +293,17 @@ fn check_energy_stability(energy_history: &[f64]) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scenario {
     DipoleRadiation,
+    /// Polarizable vacuum demo: high-amplitude source drives K field evolution.
+    VacuumK,
 }
 
 impl Scenario {
-    pub const ALL: &'static [Scenario] = &[Scenario::DipoleRadiation];
+    pub const ALL: &'static [Scenario] = &[Scenario::DipoleRadiation, Scenario::VacuumK];
 
     pub fn name(&self) -> &'static str {
         match self {
             Scenario::DipoleRadiation => "Dipole Radiation",
+            Scenario::VacuumK => "Vacuum K (Polarizable Vacuum)",
         }
     }
 }

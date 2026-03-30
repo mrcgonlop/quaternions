@@ -362,6 +362,78 @@ pub fn apply_boundaries(grid: &mut SimulationGrid, config: &BoundaryConfig, effe
     };
     apply_s_mur(s_new, s_old, config, nx, ny, nz, mur_coeff, &idx);
     apply_s_sponge(s_new, &mut grid.s_dot, config, nx, ny, nz, &idx);
+
+    // --- Step 6: K field Neumann BCs ---
+    // Zero-gradient: face cells copy k and k_dot from the adjacent interior cell.
+    apply_k_neumann(&mut grid.cells[cur], nx, ny, nz);
+}
+
+/// Apply zero-gradient (Neumann) boundary conditions to the K vacuum field.
+///
+/// Copies `k` and `k_dot` from the adjacent interior cell to each face cell on
+/// all six faces. This prevents K from being pinned at its initial value (K=1)
+/// at the boundary while the interior evolves.
+///
+/// Called from both the Mur+sponge path (inside `apply_boundaries`) and the
+/// PML path in `boundary_system` (where CellState copy already handles this,
+/// but the explicit call ensures clarity).
+pub fn apply_k_neumann(buf: &mut [crate::simulation::state::CellState], nx: usize, ny: usize, nz: usize) {
+    let idx = |x: usize, y: usize, z: usize| -> usize { z * nx * ny + y * nx + x };
+
+    // -x face: copy from x=1
+    for z in 0..nz {
+        for y in 0..ny {
+            let bi = idx(0, y, z);
+            let ni = idx(1, y, z);
+            buf[bi].k = buf[ni].k;
+            buf[bi].k_dot = buf[ni].k_dot;
+        }
+    }
+    // +x face: copy from x=nx-2
+    for z in 0..nz {
+        for y in 0..ny {
+            let bi = idx(nx - 1, y, z);
+            let ni = idx(nx - 2, y, z);
+            buf[bi].k = buf[ni].k;
+            buf[bi].k_dot = buf[ni].k_dot;
+        }
+    }
+    // -y face: copy from y=1
+    for z in 0..nz {
+        for x in 0..nx {
+            let bi = idx(x, 0, z);
+            let ni = idx(x, 1, z);
+            buf[bi].k = buf[ni].k;
+            buf[bi].k_dot = buf[ni].k_dot;
+        }
+    }
+    // +y face: copy from y=ny-2
+    for z in 0..nz {
+        for x in 0..nx {
+            let bi = idx(x, ny - 1, z);
+            let ni = idx(x, ny - 2, z);
+            buf[bi].k = buf[ni].k;
+            buf[bi].k_dot = buf[ni].k_dot;
+        }
+    }
+    // -z face: copy from z=1
+    for y in 0..ny {
+        for x in 0..nx {
+            let bi = idx(x, y, 0);
+            let ni = idx(x, y, 1);
+            buf[bi].k = buf[ni].k;
+            buf[bi].k_dot = buf[ni].k_dot;
+        }
+    }
+    // +z face: copy from z=nz-2
+    for y in 0..ny {
+        for x in 0..nx {
+            let bi = idx(x, y, nz - 1);
+            let ni = idx(x, y, nz - 2);
+            buf[bi].k = buf[ni].k;
+            buf[bi].k_dot = buf[ni].k_dot;
+        }
+    }
 }
 
 /// Apply Mur first-order ABC to the scalar S field at all Open faces.
@@ -756,6 +828,10 @@ pub fn boundary_system(
 
         apply_conducting(&mut grid.cells[cur], &config, nx, ny, nz, &idx);
         apply_periodic(&mut grid.cells[cur], &config, nx, ny, nz, &idx);
+        // K field Neumann BCs: in PML path, apply_pml_face_extrapolation already
+        // copies entire CellState (including k/k_dot). Calling apply_k_neumann
+        // here explicitly ensures K BCs are applied for non-Open faces too.
+        apply_k_neumann(&mut grid.cells[cur], nx, ny, nz);
     } else {
         // Fallback: use original Mur+sponge for backward compatibility
         apply_boundaries(&mut grid, &config, effective_dt);
@@ -887,7 +963,7 @@ mod tests {
         let params = grid.sim_params(false);
         let dt = grid.dt;
         for _ in 0..5 {
-            step_field_cpu(&mut grid, &params, None);
+            step_field_cpu(&mut grid, &params, None, None);
             grid.swap_and_advance();
             apply_boundaries(&mut grid, &config, dt);
         }
@@ -908,7 +984,7 @@ mod tests {
         let params = grid_no_bc.sim_params(false);
 
         for _ in 0..50 {
-            step_field_cpu(&mut grid_no_bc, &params, None);
+            step_field_cpu(&mut grid_no_bc, &params, None, None);
             grid_no_bc.swap_and_advance();
         }
 
@@ -923,7 +999,7 @@ mod tests {
         let bc_config = BoundaryConfig::default();
 
         for _ in 0..50 {
-            step_field_cpu(&mut grid_bc, &params, None);
+            step_field_cpu(&mut grid_bc, &params, None, None);
             grid_bc.swap_and_advance();
             apply_boundaries(&mut grid_bc, &bc_config, dt);
         }
@@ -957,7 +1033,7 @@ mod tests {
         for _ in 0..100 {
             let params = grid.sim_params(false);
             inject_sources(&mut grid, &sources, &params);
-            step_field_cpu(&mut grid, &params, None);
+            step_field_cpu(&mut grid, &params, None, None);
             grid.swap_and_advance();
             apply_boundaries(&mut grid, &bc_config, dt);
         }
@@ -970,7 +1046,7 @@ mod tests {
         for _ in 0..200 {
             let params = grid.sim_params(false);
             inject_sources(&mut grid, &no_sources, &params);
-            step_field_cpu(&mut grid, &params, None);
+            step_field_cpu(&mut grid, &params, None, None);
             grid.swap_and_advance();
             apply_boundaries(&mut grid, &bc_config, dt);
         }

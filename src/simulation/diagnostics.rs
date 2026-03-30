@@ -37,6 +37,13 @@ pub struct DiagnosticsState {
 
     /// Maximum |S| across all cells.
     pub max_s: f32,
+
+    /// Maximum K (vacuum refractive index) across all non-PML interior cells.
+    /// K=1.0 is standard vacuum; values > 1 indicate polarized vacuum regions.
+    pub max_k: f32,
+
+    /// Mean K across all non-PML interior cells.
+    pub mean_k: f32,
 }
 
 /// Compute derived electromagnetic fields from the current grid state.
@@ -193,6 +200,34 @@ pub fn max_e(derived: &[DerivedFields]) -> f32 {
         .sqrt()
 }
 
+/// Find the maximum K (vacuum refractive index) across all non-PML interior cells.
+///
+/// Returns 1.0 (vacuum default) if the grid has no interior cells.
+pub fn max_k_field(grid: &SimulationGrid) -> f32 {
+    let cells = grid.read_buf();
+    cells
+        .iter()
+        .filter(|c| (c.flags & CellFlags::PML) == 0)
+        .map(|c| c.k)
+        .fold(1.0f32, f32::max)
+}
+
+/// Find the mean K across all non-PML interior cells.
+///
+/// Returns 1.0 if the grid has no non-PML cells.
+pub fn mean_k_field(grid: &SimulationGrid) -> f32 {
+    let cells = grid.read_buf();
+    let (sum, count) = cells
+        .iter()
+        .filter(|c| (c.flags & CellFlags::PML) == 0)
+        .fold((0.0f64, 0usize), |(s, n), c| (s + c.k as f64, n + 1));
+    if count == 0 {
+        1.0
+    } else {
+        (sum / count as f64) as f32
+    }
+}
+
 /// Find the maximum |B| across all cells.
 pub fn max_b(derived: &[DerivedFields]) -> f32 {
     derived
@@ -224,6 +259,8 @@ pub fn diagnostics_system(
     diag.max_e = max_e(&fields);
     diag.max_b = max_b(&fields);
     diag.max_s = max_s(&fields);
+    diag.max_k = max_k_field(&grid);
+    diag.mean_k = mean_k_field(&grid);
     diag.fields = fields;
 }
 

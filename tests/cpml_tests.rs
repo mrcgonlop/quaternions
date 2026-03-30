@@ -91,7 +91,7 @@ fn test_pml_absorbs_pulse() {
     // Run enough steps for the pulse to reach and pass through the PML
     for _ in 0..300 {
         let params = grid.sim_params(false);
-        step_field_cpu(&mut grid, &params, Some(&mut pml));
+        step_field_cpu(&mut grid, &params, Some(&mut pml), None);
         grid.swap_and_advance();
     }
 
@@ -134,12 +134,12 @@ fn test_pml_better_than_mur() {
     for _ in 0..50 {
         let params = grid_pml.sim_params(false);
         inject_sources(&mut grid_pml, &sources, &params);
-        step_field_cpu(&mut grid_pml, &params, Some(&mut pml));
+        step_field_cpu(&mut grid_pml, &params, Some(&mut pml), None);
         grid_pml.swap_and_advance();
     }
     for _ in 0..100 {
         let params = grid_pml.sim_params(false);
-        step_field_cpu(&mut grid_pml, &params, Some(&mut pml));
+        step_field_cpu(&mut grid_pml, &params, Some(&mut pml), None);
         grid_pml.swap_and_advance();
     }
     let derived_pml = compute_derived_fields(&grid_pml, &grid_pml.sim_params(false));
@@ -151,13 +151,13 @@ fn test_pml_better_than_mur() {
     for _ in 0..50 {
         let params = grid_mur.sim_params(false);
         inject_sources(&mut grid_mur, &sources, &params);
-        step_field_cpu(&mut grid_mur, &params, None);
+        step_field_cpu(&mut grid_mur, &params, None, None);
         grid_mur.swap_and_advance();
         apply_boundaries(&mut grid_mur, &bc, dt);
     }
     for _ in 0..100 {
         let params = grid_mur.sim_params(false);
-        step_field_cpu(&mut grid_mur, &params, None);
+        step_field_cpu(&mut grid_mur, &params, None, None);
         grid_mur.swap_and_advance();
         apply_boundaries(&mut grid_mur, &bc, dt);
     }
@@ -189,7 +189,7 @@ fn test_pml_vacuum_stability() {
     // Run 50 steps on vacuum (all zeros)
     for _ in 0..50 {
         let params = grid.sim_params(false);
-        step_field_cpu(&mut grid, &params, Some(&mut pml));
+        step_field_cpu(&mut grid, &params, Some(&mut pml), None);
         grid.swap_and_advance();
     }
 
@@ -218,7 +218,7 @@ fn test_pml_extended_mode() {
     // Run with extended mode
     for _ in 0..30 {
         let params = grid.sim_params(true); // extended_mode = true
-        step_field_cpu(&mut grid, &params, Some(&mut pml));
+        step_field_cpu(&mut grid, &params, Some(&mut pml), None);
         grid.swap_and_advance();
     }
 

@@ -3,9 +3,12 @@
 //   Task 1.5: Absorbing boundaries prevent energy blowup
 
 use quaternions::simulation::boundaries::{apply_boundaries, BoundaryConfig, PmlState};
-use quaternions::simulation::diagnostics::{compute_derived_fields, max_e, max_s, total_energy};
+use quaternions::simulation::diagnostics::{
+    compute_derived_fields, max_e, max_k_field, max_s, mean_k_field, total_energy,
+};
 use quaternions::simulation::field_update::step_field_cpu;
 use quaternions::simulation::grid::SimulationGrid;
+use quaternions::simulation::plugin::VacuumConfig;
 use quaternions::simulation::sources::{inject_sources, Source, SourceConfig};
 use quaternions::simulation::state::PmlConfig;
 use quaternions::visualization::color_maps::{map_value, ColorMap};
@@ -32,7 +35,7 @@ fn test_slice_shows_dipole_radiation() {
     for _ in 0..50 {
         let p = grid.sim_params(false);
         inject_sources(&mut grid, &sources, &p);
-        step_field_cpu(&mut grid, &params, None);
+        step_field_cpu(&mut grid, &params, None, None);
         grid.swap_and_advance();
     }
 
@@ -46,6 +49,8 @@ fn test_slice_shows_dipole_radiation() {
         max_e: 0.0,
         max_b: 0.0,
         max_s: 0.0,
+        max_k: 1.0,
+        mean_k: 1.0,
     };
 
     // Sample a Z-slice at the center
@@ -125,6 +130,8 @@ fn test_slice_all_field_quantities() {
         max_e: 0.0,
         max_b: 0.0,
         max_s: 0.0,
+        max_k: 1.0,
+        mean_k: 1.0,
     };
 
     // Test all field quantities can be sampled without panicking
@@ -151,6 +158,8 @@ fn test_slice_all_axes() {
         max_e: 0.0,
         max_b: 0.0,
         max_s: 0.0,
+        max_k: 1.0,
+        mean_k: 1.0,
     };
 
     // X slice: width=nz (maps to world Z via local X), height=ny (maps to world Y via local Y)
@@ -196,7 +205,7 @@ fn test_absorbing_boundaries_prevent_energy_blowup() {
     for step in 0..200 {
         let params = grid.sim_params(false);
         inject_sources(&mut grid, &sources, &params);
-        step_field_cpu(&mut grid, &params, None);
+        step_field_cpu(&mut grid, &params, None, None);
         grid.swap_and_advance();
         apply_boundaries(&mut grid, &boundary_config, dt);
 
@@ -250,7 +259,7 @@ fn test_cfl_stability_no_blowup() {
 
     // Run 100 steps without boundaries
     for _ in 0..100 {
-        step_field_cpu(&mut grid, &params, None);
+        step_field_cpu(&mut grid, &params, None, None);
         grid.swap_and_advance();
     }
 
@@ -279,7 +288,7 @@ fn test_absorbing_damps_vs_no_absorbing() {
     let params = grid_no_bc.sim_params(false);
 
     for _ in 0..50 {
-        step_field_cpu(&mut grid_no_bc, &params, None);
+        step_field_cpu(&mut grid_no_bc, &params, None, None);
         grid_no_bc.swap_and_advance();
     }
 
@@ -294,7 +303,7 @@ fn test_absorbing_damps_vs_no_absorbing() {
     let bc_config = BoundaryConfig::default();
 
     for _ in 0..50 {
-        step_field_cpu(&mut grid_bc, &params, None);
+        step_field_cpu(&mut grid_bc, &params, None, None);
         grid_bc.swap_and_advance();
         apply_boundaries(&mut grid_bc, &bc_config, dt_bc);
     }
@@ -328,7 +337,7 @@ fn test_extended_mode_s_propagates() {
     for _ in 0..30 {
         let p = grid_std.sim_params(false);
         inject_sources(&mut grid_std, &sources, &p);
-        step_field_cpu(&mut grid_std, &p, None);
+        step_field_cpu(&mut grid_std, &p, None, None);
         grid_std.swap_and_advance();
     }
     let derived_std = compute_derived_fields(&grid_std, &grid_std.sim_params(false));
@@ -339,7 +348,7 @@ fn test_extended_mode_s_propagates() {
     for _ in 0..30 {
         let p = grid_ext.sim_params(true); // extended_mode = true
         inject_sources(&mut grid_ext, &sources, &p);
-        step_field_cpu(&mut grid_ext, &p, None);
+        step_field_cpu(&mut grid_ext, &p, None, None);
         grid_ext.swap_and_advance();
     }
     let derived_ext = compute_derived_fields(&grid_ext, &grid_ext.sim_params(true));
@@ -384,7 +393,7 @@ fn test_extended_mode_stability_with_sources() {
     for _ in 0..500 {
         let p = grid.sim_params(true); // extended mode
         inject_sources(&mut grid, &sources, &p);
-        step_field_cpu(&mut grid, &p, None);
+        step_field_cpu(&mut grid, &p, None, None);
         grid.swap_and_advance();
         apply_boundaries(&mut grid, &bc_config, p.dt);
     }
@@ -424,7 +433,7 @@ fn test_s_field_near_zero_standard_mode() {
     for _ in 0..30 {
         let params = grid.sim_params(false); // standard mode
         inject_sources(&mut grid, &sources, &params);
-        step_field_cpu(&mut grid, &params, None);
+        step_field_cpu(&mut grid, &params, None, None);
         grid.swap_and_advance();
     }
 
@@ -539,7 +548,7 @@ fn test_extended_mode_with_pml_stability() {
     for _ in 0..2000 {
         let p = grid.sim_params(true); // extended mode
         inject_sources(&mut grid, &sources, &p);
-        step_field_cpu(&mut grid, &p, Some(&mut pml_state));
+        step_field_cpu(&mut grid, &p, Some(&mut pml_state), None);
         grid.swap_and_advance();
     }
 
@@ -565,5 +574,154 @@ fn test_extended_mode_with_pml_stability() {
     assert!(
         energy.is_finite(),
         "total energy must be finite after extended+PML run: {energy}"
+    );
+}
+
+// =========================================================================
+// Task 1.8: Dynamic K field tests
+// =========================================================================
+
+/// K=1 vacuum with no EM fields → K should remain exactly 1.0 after 1000 steps.
+#[test]
+fn test_k_vacuum_stable() {
+    let mut grid = SimulationGrid::new(16, 16, 16, 0.01);
+    let params = grid.sim_params(false);
+
+    // VacuumConfig with omega_p=0 and eta=0: restoring force and coupling both zero.
+    // K should not drift from 1.0 (no driving, no Laplacian from uniform K=1).
+    let vacuum = VacuumConfig {
+        enabled: true,
+        omega_p: 0.0,
+        eta: 0.0,
+        u_s: 1.0,
+    };
+
+    for _ in 0..1000 {
+        step_field_cpu(&mut grid, &params, None, Some(&vacuum));
+        grid.swap_and_advance();
+    }
+
+    let max_k = max_k_field(&grid);
+    let mean_k = mean_k_field(&grid);
+    assert!(
+        (max_k - 1.0).abs() < 1e-6,
+        "K should remain 1.0 in vacuum with no fields; got max_k={max_k}"
+    );
+    assert!(
+        (mean_k - 1.0).abs() < 1e-6,
+        "mean K should be 1.0; got {mean_k}"
+    );
+}
+
+/// Strong E field with non-zero eta → K should increase above 1.0.
+///
+/// Uses a large-amplitude linear phi profile Q.w = x * A * dx.  A linear
+/// profile has zero Laplacian, so Q is unchanged by the wave equation, but
+/// it creates a uniform static E field that drives K upward.
+/// The amplitude A is chosen so that the K change after N steps exceeds
+/// the f32 resolution (~1.2e-7).
+#[test]
+fn test_k_increases_with_field() {
+    let mut grid = SimulationGrid::new(16, 16, 16, 0.01);
+
+    // Large-amplitude linear phi gradient: Q.w = x * A * dx
+    // E_x = -c₀ * A (uniform, static since Laplacian is zero).
+    // A = 1e5 → E_x ≈ -3e13 V/m → u_field ≈ 0.5*ε₀*E² ≈ 4e15 J/m³.
+    // k_ddot = eta * u_field / u_s = 1.0 * 4e15 = 4e15 s⁻²
+    // After 50 steps: Δk ≈ k_ddot * N(N+1)/2 * dt² ≈ 4e15 * 1275 * 3e-22 ≈ 1.5e-3 >> 1e-5
+    let amplitude: f32 = 1e5;
+    let nx = grid.nx as usize;
+    let ny = grid.ny as usize;
+    let nz = grid.nz as usize;
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
+                let i = grid.idx(x as u32, y as u32, z as u32);
+                let v = x as f32 * amplitude * grid.dx;
+                grid.cells[0][i].q[0] = v;
+                grid.cells[1][i].q[0] = v;
+            }
+        }
+    }
+
+    let params = grid.sim_params(false);
+    let vacuum = VacuumConfig {
+        enabled: true,
+        omega_p: 0.0, // no restoring force — pure driving
+        eta: 1.0,
+        u_s: 1.0,
+    };
+
+    for _ in 0..50 {
+        step_field_cpu(&mut grid, &params, None, Some(&vacuum));
+        grid.swap_and_advance();
+    }
+
+    let max_k = max_k_field(&grid);
+    assert!(
+        max_k > 1.0 + 1e-5,
+        "K should increase above 1.0 when strong E field drives eta*u_field/u_s > 0; got max_k={max_k}"
+    );
+}
+
+/// After removing the driving field, K should decay back toward 1.0
+/// via the ωₚ² restoring force.
+#[test]
+fn test_k_restores_after_pulse() {
+    let mut grid = SimulationGrid::new(16, 16, 16, 0.01);
+
+    // Manually perturb K above 1.0 in the center region
+    let center = grid.nx as usize / 2;
+    for dz in 0..3usize {
+        for dy in 0..3usize {
+            for dx in 0..3usize {
+                let x = (center - 1 + dx) as u32;
+                let y = (center - 1 + dy) as u32;
+                let z = (center - 1 + dz) as u32;
+                let i = grid.idx(x, y, z);
+                grid.cells[0][i].k = 2.0;
+                grid.cells[1][i].k = 2.0;
+            }
+        }
+    }
+
+    let params = grid.sim_params(false);
+    let omega_p = quaternions::simulation::state::SimParams::C0 / (50.0 * grid.dx);
+    let vacuum = VacuumConfig {
+        enabled: true,
+        omega_p,
+        eta: 0.0, // no driving — only restoring force
+        u_s: 1.0,
+    };
+
+    // Record initial max K
+    let k_before = max_k_field(&grid);
+
+    // Run enough steps for restoring force to reduce K
+    for _ in 0..200 {
+        step_field_cpu(&mut grid, &params, None, Some(&vacuum));
+        grid.swap_and_advance();
+    }
+
+    let k_after = max_k_field(&grid);
+    assert!(
+        k_after < k_before,
+        "K should decay toward 1.0 after pulse removed (ωₚ² restoring); before={k_before:.4}, after={k_after:.4}"
+    );
+}
+
+/// K diagnostics helpers return sensible values on a vacuum grid.
+#[test]
+fn test_k_diagnostics_vacuum() {
+    let grid = SimulationGrid::new(8, 8, 8, 0.01);
+    let max_k = max_k_field(&grid);
+    let mean_k = mean_k_field(&grid);
+    assert!(
+        (max_k - 1.0).abs() < 1e-6,
+        "max_k on vacuum grid should be 1.0, got {max_k}"
+    );
+    assert!(
+        (mean_k - 1.0).abs() < 1e-6,
+        "mean_k on vacuum grid should be 1.0, got {mean_k}"
     );
 }

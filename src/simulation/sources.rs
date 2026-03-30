@@ -108,6 +108,15 @@ pub fn inject_sources(grid: &mut SimulationGrid, sources: &SourceConfig, params:
     // ε₀ = 1 / (μ₀ * c²), μ₀ = 4π×10⁻⁷
     let epsilon_0: f32 = 8.854e-12;
 
+    // Clear SOURCE flags from all cells before re-marking current positions.
+    // Without this, moving a source in the UI leaves the flag set on the old
+    // cell forever (field_update copies flags each step), causing yellow boxes
+    // to accumulate at every past position.
+    let cur = grid.current;
+    for cell in grid.cells[cur].iter_mut() {
+        cell.flags &= !crate::simulation::state::CellFlags::SOURCE;
+    }
+
     for source in &sources.sources {
         if !source.active {
             continue;
@@ -126,7 +135,6 @@ pub fn inject_sources(grid: &mut SimulationGrid, sources: &SourceConfig, params:
         let cell = grid.cell_mut(gx, gy, gz);
 
         // Mark the cell so geometry visualization can draw a source marker.
-        // The flag persists until grid.reset() clears all non-PML flags.
         cell.flags |= crate::simulation::state::CellFlags::SOURCE;
 
         match &source.source_type {

@@ -5,9 +5,10 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
 use crate::scenarios::dipole_radiation::{self, Scenario};
+use crate::scenarios::vacuum_k;
 use crate::simulation::diagnostics::DiagnosticsState;
 use crate::simulation::grid::SimulationGrid;
-use crate::simulation::plugin::SimulationConfig;
+use crate::simulation::plugin::{SimulationConfig, VacuumConfig};
 use crate::simulation::sources::{Source, SourceConfig, SourceType};
 use crate::visualization::color_maps::{ColorEncoding, ColorMap, PhasePlane};
 use crate::visualization::glyphs::{GlyphConfig, GlyphField};
@@ -40,6 +41,7 @@ fn ui_side_panel(
     mut sources: ResMut<SourceConfig>,
     mut selected_scenario: ResMut<SelectedScenario>,
     mut pml: Option<ResMut<crate::simulation::boundaries::PmlState>>,
+    mut vacuum_config: ResMut<VacuumConfig>,
 ) {
     let ctx = contexts.ctx_mut();
 
@@ -190,6 +192,18 @@ fn ui_side_panel(
                                         }
                                         config.paused = true;
                                     }
+                                    Scenario::VacuumK => {
+                                        vacuum_k::apply_vacuum_k_scenario(
+                                            grid,
+                                            &mut sources,
+                                            &mut vacuum_config,
+                                        );
+                                        if let Some(ref mut pml_state) = pml {
+                                            pml_state.reset_psi();
+                                        }
+                                        config.extended_mode = false;
+                                        config.paused = true;
+                                    }
                                 }
                             }
                         }
@@ -238,6 +252,14 @@ fn ui_diagnostics_panel(
 
                 ui.label("Max |S|:");
                 ui.label(format!("{:.4e}", diag.max_s));
+                ui.end_row();
+
+                ui.label("Max K:");
+                ui.label(format!("{:.4}", diag.max_k));
+                ui.end_row();
+
+                ui.label("Mean K:");
+                ui.label(format!("{:.4}", diag.mean_k));
                 ui.end_row();
             });
 
