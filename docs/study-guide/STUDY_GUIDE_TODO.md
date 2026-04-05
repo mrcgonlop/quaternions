@@ -150,8 +150,16 @@
   - The electron as the first subatomic particle
   - *Key idea:* electric current is the flow of discrete charged particles; the microscopic basis of Ohm's law
 
-- `[x]` **Ch 20 — The Ether Crisis** — Michelson & Morley (1887), FitzGerald, Lodge, Lorentz
+- `[x]` **Ch 20 — Moving Charges ARE Currents** — Henry Rowland (1876)
+  - Rowland's spinning charged disc: moving charges (not just wire currents) produce magnetic fields
+  - Established $\mathbf{J} = \rho\mathbf{v}$ as a universal relation
+  - Bridges Ampère's circuit laws to point-charge physics of Lorentz
+  - Connection to Weber: Weber's force was always between moving charges; Rowland confirmed this experimentally
+  - *Key idea:* magnetism is fundamentally about charge in motion; Weber knew this all along
+
+- `[x]` **Ch 21 — The Ether Crisis** — Michelson & Morley (1887), FitzGerald, Lodge, Lorentz
   - The luminiferous ether: the supposed medium for EM waves
+  - Fresnel vs Stokes ether drag debate; Fizeau's confirmation of partial drag
   - Michelson-Morley interferometer: null result — no ether wind detected
   - FitzGerald contraction: length contracts in direction of motion
   - Lodge's experiments: searching for ether drag
@@ -159,7 +167,14 @@
   - The Lorentz force: $\mathbf{F} = q(\mathbf{E} + \mathbf{v}\times\mathbf{B})$
   - *Key idea:* no preferred frame; the speed of light is invariant; the Lorentz force replaces Weber's force in the standard framework — but note it has NO longitudinal component
 
-- `[x]` **Ch 21 — Special Relativity and the Photon** — Einstein (1905)
+- `[x]` **Ch 22 — Electromagnetic Mass and the 4/3 Problem** — J.J. Thomson (1881), Abraham (1902), Poincaré (1906)
+  - EM field carries energy → electromagnetic mass $m_{EM} = U_{EM}/c^2$
+  - Abraham: EM momentum gives 4/3 of energy-derived mass — a self-consistency failure
+  - Poincaré stresses: non-EM binding forces needed to stabilize the electron
+  - Classical self-energy diverges for point charges
+  - *Key idea:* classical EM cannot self-consistently describe a stable charged particle; Weber forces and K field provide candidate binding mechanisms
+
+- `[x]` **Ch 23 — Special Relativity and the Photon** — Einstein (1905)
   - Photoelectric effect: $E = hf - \phi$ — light as quanta
   - Special relativity: the speed of light is the same in all frames
   - $E = mc^2$: mass-energy equivalence
@@ -167,21 +182,28 @@
   - Relativity as the successor to ether theory — but what about the vacuum structure?
   - *Key idea:* light is both wave and particle; spacetime replaces ether; but the vacuum may still have structure (Casimir, QED)
 
+- `[x]` **Ch 24 — Radiation Reaction: Classical EM's Skeleton in the Closet** — Larmor (1897), Abraham (1903), Dirac (1938)
+  - Larmor formula: accelerating charges radiate $P = q^2a^2/(6\pi\varepsilon_0 c^3)$
+  - Abraham-Lorentz force: $\mathbf{F} = m\tau_0\dot{\mathbf{a}}$ — third-order ODE with pathologies
+  - Runaway solutions: free charges accelerate to infinity; pre-acceleration: acausal response
+  - Weber avoids self-force problem entirely (action-at-a-distance between pairs)
+  - *Key idea:* classical EM is fundamentally incomplete for point charges; the vacuum needs structure
+
 ### Part V: Quantum Electrodynamics and the Vacuum (1920 – 1960)
-- `[x]` **Ch 22 — Quantum Mechanics Meets EM** — Planck (1900), Dirac (1928)
+- `[x]` **Ch 25 — Quantum Mechanics Meets EM** — Planck (1900), Dirac (1928)
   - Planck's blackbody radiation: $E = nhf$ — energy is quantized
   - Dirac equation: relativistic quantum mechanics, predicts antimatter
-  - Magnetic monopoles: Dirac's argument from charge quantization
+  - Magnetic monopoles: Dirac's argument from charge quantization (expanded with topology section)
   - *Key idea:* the electromagnetic field is quantized; the vacuum has zero-point energy
 
-- `[x]` **Ch 23 — QED: The Precise Theory** — Feynman, Schwinger, Tomonaga (1940s–1950s)
+- `[x]` **Ch 26 — QED: The Precise Theory** — Feynman, Schwinger, Tomonaga (1940s–1950s)
   - Path integral formulation (Feynman): sum over all possible photon exchanges
   - Renormalization: taming infinities in vacuum self-energy
   - Anomalous magnetic moment of the electron: theory matches experiment to 12 decimal places
   - Lamb shift: vacuum fluctuations shift atomic energy levels
   - *Key idea:* QED is the most precisely tested theory in physics; it is built on gauge invariance (the assumption that S = 0 is physical)
 
-- `[x]` **Ch 24 — The Vacuum Has Structure** — Casimir (1948), Euler-Heisenberg
+- `[x]` **Ch 27 — The Vacuum Has Structure** — Casimir (1948), Euler-Heisenberg
   - Casimir effect: $$F/A = -\frac{\pi^2 \hbar c}{240 d^4}$$ — attractive force between parallel plates from vacuum fluctuations
   - Euler-Heisenberg effective Lagrangian: vacuum becomes nonlinear in strong fields
   - Schwinger limit: $E_S = \frac{m_e^2 c^3}{e\hbar} \approx 1.3 \times 10^{18}$ V/m — pair production threshold
@@ -189,7 +211,7 @@
   - *Key idea:* the vacuum is not empty — it has measurable physical properties; this supports the idea of a polarizable vacuum
 
 ### Part V½: Nuclear Physics and Broken Symmetry
-- `[x]` **Ch 25 — The Nuclear Force: How Binding Actually Works** — Rutherford (1911), Yukawa (1935)
+- `[x]` **Ch 28 — The Nuclear Force: How Binding Actually Works** — Rutherford (1911), Yukawa (1935)
   - Rutherford's nucleus: positive charge concentrated in 10⁻¹⁵ m
   - The binding problem: Coulomb repulsion between protons should blow nuclei apart
   - Yukawa's meson theory: massive mediator → short-range attraction
@@ -198,7 +220,7 @@
   - Structural analogy to proposed EVO binding (Coulomb repulsion overcome by short-range attraction)
   - *Key idea:* like charges CAN be bound if a sufficiently strong short-range attraction exists; this is the pattern for K-enhanced Weber binding
 
-- `[x]` **Ch 26 — Parity Violation and Broken Symmetry** — Lee & Yang (1956), Wu (1957), Prigogine
+- `[x]` **Ch 29 — Parity Violation and Broken Symmetry** — Lee & Yang (1956), Wu (1957), Prigogine
   - Parity (P): mirror symmetry of physical laws — assumed fundamental before 1957
   - The theta-tau puzzle: identical particles decaying with different parities
   - Lee & Yang: parity had never been TESTED in weak interactions — only assumed
@@ -209,21 +231,35 @@
   - *Key idea:* symmetries are hypotheses to test, not axioms to assume; broken symmetry enables energy flow; the vacuum is an energy reservoir (Casimir); if gauge symmetry breaks (S ≠ 0), vacuum energy becomes accessible in principle
 
 ### Part VI: Potentials Are Physical (1959 – present)
-- `[x]` **Ch 27 — The Aharonov-Bohm Effect** — Aharonov & Bohm (1959), Tonomura (1986)
+- `[x]` **Ch 30 — The Aharonov-Bohm Effect** — Aharonov & Bohm (1959), Tonomura (1986)
   - Prediction: electron phase shifts from A even where B = 0
   - Tonomura's electron holography: definitive experimental confirmation
   - Three interpretive positions: gauge redundancy, potential realism, fiber bundles
   - *Key idea:* the vector potential A carries physical information that B does not encode locally; this undermines the claim that potentials are "just" mathematical
 
-- `[x]` **Ch 28 — Topological Solitons** — Tony Skyrme (1961)
+- `[x]` **Ch 31 — Superconductivity: When the Potential Becomes Undeniable** — Onnes (1911), Meissner (1933), London (1935)
+  - Zero resistance (1911), Meissner effect: active field expulsion (not just perfect conduction)
+  - London equation: $\mathbf{J}_s = -(n_s e^2/m)\mathbf{A}$ — current responds directly to A
+  - Flux quantization: $\Phi = n(h/2e)$ — first evidence of Cooper pairs
+  - Josephson effect and SQUIDs: most sensitive magnetometry, based on phase of A
+  - *Key idea:* superconductors respond to A directly; gauge conditions are physical constraints, not mathematical choices
+
+- `[x]` **Ch 32 — Topological Solitons** — Tony Skyrme (1961)
   - Skyrmions: topologically protected field configurations with integer winding number
   - $\pi_3(S^3) = \mathbb{Z}$: maps from space to the quaternion sphere are classified by integers
   - Topological charge cannot change continuously — stability without a confining potential
   - Connection to quaternions: unit quaternions form $S^3$, so quaternionic fields naturally support Skyrmions
   - *Key idea:* topology provides stability; field configurations with nonzero winding number are "knotted" and cannot unravel
 
+- `[x]` **Ch 33 — Berry Phase: Potentials Rule All of Physics** — Berry (1984), Pancharatnam (1956)
+  - Berry phase: geometric phase from adiabatic transport in parameter space
+  - Berry connection $\mathcal{A}$ is mathematically identical to vector potential A
+  - Aharonov-Bohm is a special case; Berry phase is universal
+  - Quantum Hall effect and topological insulators: Chern numbers from Berry curvature
+  - *Key idea:* connections (potentials) are primary in all of physics; Heaviside's reduction discarded this primacy
+
 ### Part VIb: Plasma Physics and the Virtual Pair Picture (1920s – 1999)
-- `[x]` **Ch 29 — Plasma Physics Fundamentals** — Langmuir (1920s), Debye, Tonks, Alfvén (1942)
+- `[x]` **Ch 34 — Plasma Physics Fundamentals** — Langmuir (1920s), Debye, Tonks, Alfvén (1942)
   - Plasma = ionized gas: free electrons + ions responding to EM fields
   - Debye shielding: $\lambda_D = \sqrt{\varepsilon_0 k_B T/(n_e e^2)}$ — plasmas screen electric fields
   - Plasma frequency: $\omega_p = \sqrt{n_e e^2/(m_e \varepsilon_0)}$ — below this, waves are reflected
@@ -233,7 +269,7 @@
   - Spheromaks and Taylor relaxation: plasma self-organizes into topologically linked field structures
   - *Key idea:* plasmas are the physical precedent for K field behavior; both transverse and longitudinal modes; self-organization into Hopf-linked topology is a real, observed plasma phenomenon
 
-- `[x]` **Ch 30 — The Virtual Pair Plasma** — Schwinger (1951), Puthoff (1999)
+- `[x]` **Ch 35 — The Virtual Pair Plasma** — Schwinger (1951), Puthoff (1999)
   - QED vacuum as virtual $e^+e^-$ plasma: $n_{\text{virt}} \sim 10^{37}$ m⁻³, $\omega_{p,\text{vac}} \approx 7.8 \times 10^{20}$ Hz
   - Below $\omega_{p,\text{vac}}$ (all lab physics): virtual pairs polarize collectively → K field
   - Above $\omega_{p,\text{vac}}$: Schwinger pair production — vacuum "boils"
@@ -244,28 +280,28 @@
   - *Key idea:* K is the classical envelope of quantum vacuum polarization; the plasma analogy is exact in the simulator's regime; Schwinger provides rigorous QM foundation
 
 ### Part VII: The Unconventional Thread (1980s – present)
-- `[x]` **Ch 31 — Longitudinal Forces Revisited** — Peter Graneau (1980s), André Assis (1994)
+- `[x]` **Ch 36 — Longitudinal Forces Revisited** — Peter Graneau (1980s), André Assis (1994)
   - Graneau's experiments: exploding wires, mercury jets, water arc explosions
   - Forces along the current direction — inconsistent with Lorentz, consistent with Weber
   - Assis: Weber's force IS the retarded potential expanded to O(v²/c²)
   - The missing forces were always in Maxwell — hidden by gauge fixing
   - *Key idea:* experimental evidence for longitudinal EM forces that standard theory cannot produce; Weber and Maxwell agree when you keep the full potential structure
 
-- `[x]` **Ch 32 — Electrogravitics and Anomalous Forces** — Thomas Townsend Brown (1920s–1960s)
+- `[x]` **Ch 37 — Electrogravitics and Anomalous Forces** — Thomas Townsend Brown (1920s–1960s)
   - Brown's experiments: asymmetric capacitors under high voltage show apparent thrust
   - The Biefeld-Brown effect
   - Controversy: ion wind vs genuine electrogravitic coupling
   - Connection to vacuum polarization: if K(x) varies, local c varies → effective refractive index gradient → radiation pressure asymmetry
   - *Key idea:* anomalous forces in strong-field EM remain unexplained; the vacuum polarization framework provides a candidate mechanism (but quantitative predictions are needed)
 
-- `[x]` **Ch 33 — Exotic Vacuum Objects** — Ken Shoulders (1990s)
+- `[x]` **Ch 38 — Exotic Vacuum Objects** — Ken Shoulders (1990s)
   - EVO (Exotic Vacuum Object) observations: coherent charge clusters (10⁶–10¹¹ electrons) that self-bind
   - Micron-scale, propagate through materials, leave characteristic tracks
   - Standard EM says they should explode from Coulomb repulsion
   - Proposed mechanism: K > 1 pocket → enhanced Weber attraction → self-binding
   - *Key idea:* experimental observations of charge clusters that defy standard EM; the QVED framework offers a binding mechanism through vacuum polarization feedback
 
-- `[x]` **Ch 34 — Extended Maxwell Equations and the S Field** — van Vlaenderen & Waser (2001), Whittaker (1903)
+- `[x]` **Ch 39 — Extended Maxwell Equations and the S Field** — van Vlaenderen & Waser (2001), Whittaker (1903)
   - Whittaker's scalar potential decomposition (1903): any EM field decomposable into scalar waves
   - Van Vlaenderen's extended Maxwell equations (the ones in your simulation):
     $$\nabla\cdot\mathbf{E} = \frac{\rho}{\varepsilon_0} - \frac{\partial S}{\partial t}$$
@@ -274,7 +310,7 @@
   - The polarizable vacuum: $K(x) \geq 1$, $c_{\text{local}} = c_0/K$
   - *Key idea:* removing the gauge constraint restores the scalar degree of freedom; this is what your simulation computes in extended_mode
 
-- `[x]` **Ch 35 — Topological EM: Hopfions and Ball Lightning** — Rañada, Irvine & Bouwmeester (2008)
+- `[x]` **Ch 40 — Topological EM: Hopfions and Ball Lightning** — Rañada, Irvine & Bouwmeester (2008)
   - Hopf fibration: every pair of field lines links exactly once
   - Hopfion solutions to Maxwell's equations (exact but unstable in linear EM)
   - QVED nonlinearity (K field feedback) as stabilization mechanism
@@ -285,7 +321,19 @@
 
 ## Status: COMPLETE
 
-All 35 chapters written. Document: `study_guide.md` (~27,000 words).
+All 40 chapters written. Document: `study_guide.md` (~35,000 words).
+
+New chapters added (April 2026):
+- Ch 20: Rowland's Experiment — moving charges are currents
+- Ch 22: Electromagnetic Mass and the 4/3 Problem
+- Ch 24: Radiation Reaction — Abraham-Lorentz force pathologies
+- Ch 31: Superconductivity — London equation, Meissner effect, flux quantization
+- Ch 33: Berry Phase — geometric phase, connections as primary objects
+
+Enrichments:
+- Ch 10: Expanded Kirchhoff speed-of-light section with telegrapher's equations and Weber-Kohlrausch priority
+- Ch 21: Added Fresnel-Stokes ether drag debate and Fizeau experiment
+- Ch 25: Expanded Dirac monopole section with topology, Wu-Yang fiber bundles, and Chern class
 
 ## Rendering to PDF
 
