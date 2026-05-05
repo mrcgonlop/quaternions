@@ -28,6 +28,10 @@ pub enum SourceType {
         /// Center time of the Gaussian peak in seconds.
         t_center: f32,
     },
+    /// Scalar field drive: oscillating injection into s_dot.
+    /// Models the effective scalar source from geometries (like bifilar coils)
+    /// where ∂(∇·A)/∂t drives the S field in extended mode.
+    ScalarDrive,
 }
 
 /// A single electromagnetic source.
@@ -132,42 +136,40 @@ pub fn inject_sources(grid: &mut SimulationGrid, sources: &SourceConfig, params:
             continue;
         }
 
-        let cell = grid.cell_mut(gx, gy, gz);
+        let idx = grid.idx(gx, gy, gz);
 
         // Mark the cell so geometry visualization can draw a source marker.
-        cell.flags |= crate::simulation::state::CellFlags::SOURCE;
+        grid.cells[grid.current][idx].flags |= crate::simulation::state::CellFlags::SOURCE;
 
         match &source.source_type {
             SourceType::OscillatingDipole { axis } => {
-                // J(t) = J0 * sin(2πft + phase)
-                // The source drives ∂A/∂t at the source location.
-                // For the vector potential: q_dot[axis+1] += (J0/ε₀) * sin(ωt) * dt
-                // The axis+1 maps x,y,z axes → q components 1,2,3.
                 let omega = 2.0 * std::f32::consts::PI * source.frequency;
                 let j = source.amplitude * (omega * time + source.phase).sin();
-
-                // Inject as acceleration of the vector potential component
-                cell.q_dot[axis + 1] += (j / epsilon_0) * dt;
+                grid.cells[grid.current][idx].q_dot[axis + 1] += (j / epsilon_0) * dt;
             }
             SourceType::PointCharge => {
-                // Soft source: drive phi/c toward the Coulomb value via feedback.
-                // phi ≈ q / (4πε₀ * dx) (monopole approximation at the cell)
-                // Instead of hard-setting q[0] (which creates a permanent
-                // Laplacian discontinuity that destabilizes extended mode),
-                // we apply proportional feedback through q_dot[0].
                 let phi = source.amplitude / (4.0 * std::f32::consts::PI * epsilon_0 * dx);
                 let target_q0 = phi / c0;
+                let cell = &mut grid.cells[grid.current][idx];
                 let error = target_q0 - cell.q[0];
-                // Relax toward target over ~dx/c0 timescale
                 cell.q_dot[0] += error * (c0 / dx) * dt;
             }
             SourceType::CurrentPulse { axis, sigma, t_center } => {
-                // Gaussian-envelope current pulse
-                // J(t) = J0 * exp(-(t - t_center)² / (2σ²))
                 let t_diff = time - t_center;
                 let j = source.amplitude * (-t_diff * t_diff / (2.0 * sigma * sigma)).exp();
-
-                cell.q_dot[axis + 1] += (j / epsilon_0) * dt;
+                grid.cells[grid.current][idx].q_dot[axis + 1] += (j / epsilon_0) * dt;
+            }
+            SourceType::ScalarDrive => {
+                // Drive the S field directly via s_dot injection.
+                // s_dot += amplitude * sin(ωt + phase) * dt
+                //
+                // Models the effective scalar source from geometries where
+                // ∂(∇·A)/∂t is nonzero (e.g., bifilar coils with B cancellation).
+                // Only meaningful in extended mode, but we inject regardless —
+                // in standard mode the S field is ignored by diagnostics.
+                let omega = 2.0 * std::f32::consts::PI * source.frequency;
+                let drive = source.amplitude * (omega * time + source.phase).sin();
+                grid.s_dot[idx] += drive * dt;
             }
         }
     }

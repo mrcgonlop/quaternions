@@ -295,15 +295,26 @@ pub enum Scenario {
     DipoleRadiation,
     /// Polarizable vacuum demo: high-amplitude source drives K field evolution.
     VacuumK,
+    /// Bifilar coil: B-cancelling geometry that excites scalar/longitudinal modes.
+    BifilarCoil,
+    /// Bifilar pair: transmitter + receiver for scalar wave coupling measurement.
+    BifilarPair,
 }
 
 impl Scenario {
-    pub const ALL: &'static [Scenario] = &[Scenario::DipoleRadiation, Scenario::VacuumK];
+    pub const ALL: &'static [Scenario] = &[
+        Scenario::DipoleRadiation,
+        Scenario::VacuumK,
+        Scenario::BifilarCoil,
+        Scenario::BifilarPair,
+    ];
 
     pub fn name(&self) -> &'static str {
         match self {
             Scenario::DipoleRadiation => "Dipole Radiation",
             Scenario::VacuumK => "Vacuum K (Polarizable Vacuum)",
+            Scenario::BifilarCoil => "Bifilar Coil (Scalar Wave)",
+            Scenario::BifilarPair => "Bifilar Pair (Tx/Rx)",
         }
     }
 }

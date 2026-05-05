@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 
 use crate::simulation::boundaries::{self, BoundaryConfig, PmlState};
-use crate::simulation::diagnostics::{self, DiagnosticsState};
+use crate::simulation::diagnostics::{self, DiagnosticsState, ProbeSet};
 use crate::simulation::field_update::step_field_cpu;
 use crate::simulation::grid::SimulationGrid;
 use crate::simulation::sources::{self, SourceConfig};
@@ -98,6 +98,7 @@ impl Plugin for SimulationPlugin {
             .init_resource::<DiagnosticsState>()
             .init_resource::<BoundaryConfig>()
             .init_resource::<VacuumConfig>()
+            .init_resource::<ProbeSet>()
             .add_systems(Startup, init_grid)
             .add_systems(
                 Update,
@@ -107,6 +108,7 @@ impl Plugin for SimulationPlugin {
                     simulation_step_system,
                     boundaries::boundary_system,
                     diagnostics::diagnostics_system,
+                    diagnostics::probe_system,
                 )
                     .chain()
                     .in_set(SimulationSet),

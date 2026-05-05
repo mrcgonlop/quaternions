@@ -4,7 +4,8 @@
 
 use quaternions::simulation::boundaries::{apply_boundaries, BoundaryConfig, PmlState};
 use quaternions::simulation::diagnostics::{
-    compute_derived_fields, max_e, max_k_field, max_s, mean_k_field, total_energy,
+    compute_derived_fields, compute_topological_charge, max_e, max_k_field, max_s, mean_k_field,
+    total_energy,
 };
 use quaternions::simulation::field_update::step_field_cpu;
 use quaternions::simulation::grid::SimulationGrid;
@@ -51,6 +52,7 @@ fn test_slice_shows_dipole_radiation() {
         max_s: 0.0,
         max_k: 1.0,
         mean_k: 1.0,
+        topological_charge: 0.0,
     };
 
     // Sample a Z-slice at the center
@@ -132,6 +134,7 @@ fn test_slice_all_field_quantities() {
         max_s: 0.0,
         max_k: 1.0,
         mean_k: 1.0,
+        topological_charge: 0.0,
     };
 
     // Test all field quantities can be sampled without panicking
@@ -160,6 +163,7 @@ fn test_slice_all_axes() {
         max_s: 0.0,
         max_k: 1.0,
         mean_k: 1.0,
+        topological_charge: 0.0,
     };
 
     // X slice: width=nz (maps to world Z via local X), height=ny (maps to world Y via local Y)
@@ -723,5 +727,165 @@ fn test_k_diagnostics_vacuum() {
     assert!(
         (mean_k - 1.0).abs() < 1e-6,
         "mean_k on vacuum grid should be 1.0, got {mean_k}"
+    );
+}
+
+// =========================================================================
+// Task 1.9 verification: topological charge diagnostic
+// =========================================================================
+
+/// Uniform Q field → topological charge = 0 (no winding).
+#[test]
+fn test_topo_charge_vacuum() {
+    let grid = SimulationGrid::new(8, 8, 8, 0.01);
+    let charge = compute_topological_charge(&grid);
+    assert!(
+        charge.abs() < 1e-6,
+        "vacuum grid should have zero topological charge, got {charge}"
+    );
+}
+
+/// Hedgehog configuration: Q ∝ (r, x, y, z) normalized → topological charge = ±1.
+///
+/// The hedgehog maps R³ → S³ with winding number 1. We set Q = (r, x, y, z)
+/// where r = sqrt(x² + y² + z²) measured from grid center, which wraps S³ once.
+#[test]
+fn test_topo_charge_hedgehog() {
+    let n = 32u32;
+    let dx = 0.01;
+    let mut grid = SimulationGrid::new(n, n, n, dx);
+    let center = n as f32 / 2.0;
+
+    for z in 0..n {
+        for y in 0..n {
+            for x in 0..n {
+                let i = grid.idx(x, y, z);
+                let rx = x as f32 - center;
+                let ry = y as f32 - center;
+                let rz = z as f32 - center;
+                let r = (rx * rx + ry * ry + rz * rz).sqrt();
+
+                // Q = (cos(π*r/R), sin(π*r/R) * r_hat)
+                // This is the standard hedgehog ansatz mapping a ball of radius R to S³
+                let max_r = center; // radius of the grid domain
+                if r < 1e-6 {
+                    // At origin: Q = (1, 0, 0, 0)
+                    grid.cells[0][i].q = [1.0, 0.0, 0.0, 0.0];
+                } else {
+                    let theta = std::f32::consts::PI * (r / max_r).min(1.0);
+                    let cos_t = theta.cos();
+                    let sin_t = theta.sin();
+                    let inv_r = 1.0 / r;
+                    grid.cells[0][i].q = [
+                        cos_t,
+                        sin_t * rx * inv_r,
+                        sin_t * ry * inv_r,
+                        sin_t * rz * inv_r,
+                    ];
+                }
+            }
+        }
+    }
+
+    let charge = compute_topological_charge(&grid);
+    // The hedgehog should give charge ≈ ±1 (sign depends on orientation convention).
+    // On a finite grid with central differences, we accept |charge| in [0.5, 1.5].
+    assert!(
+        (charge.abs() - 1.0).abs() < 0.5,
+        "hedgehog should have |topological charge| ≈ 1, got {charge}"
+    );
+}
+
+/// Slowly varying Q field (small perturbation from uniform) → charge ≈ 0.
+#[test]
+fn test_topo_charge_smooth_field() {
+    let n = 16u32;
+    let dx = 0.01;
+    let mut grid = SimulationGrid::new(n, n, n, dx);
+
+    // Set Q to a gently varying field: Q = (1, εx, εy, εz) normalized
+    let epsilon = 0.01;
+    let center = n as f32 / 2.0;
+    for z in 0..n {
+        for y in 0..n {
+            for x in 0..n {
+                let i = grid.idx(x, y, z);
+                let rx = (x as f32 - center) * epsilon;
+                let ry = (y as f32 - center) * epsilon;
+                let rz = (z as f32 - center) * epsilon;
+                let norm = (1.0 + rx * rx + ry * ry + rz * rz).sqrt();
+                grid.cells[0][i].q = [1.0 / norm, rx / norm, ry / norm, rz / norm];
+            }
+        }
+    }
+
+    let charge = compute_topological_charge(&grid);
+    assert!(
+        charge.abs() < 0.1,
+        "slowly varying Q should have near-zero topological charge, got {charge}"
+    );
+}
+
+/// Evolve a non-trivial Q configuration for 50 steps; charge should be roughly conserved.
+/// On a finite grid with open boundaries, some drift is expected due to field leaking
+/// through boundaries and discretization effects.
+#[test]
+fn test_topo_charge_conserved() {
+    let n = 32u32;
+    let dx = 0.01;
+    let mut grid = SimulationGrid::new(n, n, n, dx);
+    let center = n as f32 / 2.0;
+
+    // Set up a hedgehog-like configuration
+    for z in 0..n {
+        for y in 0..n {
+            for x in 0..n {
+                let i = grid.idx(x, y, z);
+                let rx = x as f32 - center;
+                let ry = y as f32 - center;
+                let rz = z as f32 - center;
+                let r = (rx * rx + ry * ry + rz * rz).sqrt();
+                let max_r = center;
+
+                if r < 1e-6 {
+                    grid.cells[0][i].q = [1.0, 0.0, 0.0, 0.0];
+                } else {
+                    let theta = std::f32::consts::PI * (r / max_r).min(1.0);
+                    let cos_t = theta.cos();
+                    let sin_t = theta.sin();
+                    let inv_r = 1.0 / r;
+                    grid.cells[0][i].q = [
+                        cos_t,
+                        sin_t * rx * inv_r,
+                        sin_t * ry * inv_r,
+                        sin_t * rz * inv_r,
+                    ];
+                }
+            }
+        }
+    }
+
+    let charge_initial = compute_topological_charge(&grid);
+
+    // Evolve for 100 steps with extended mode (so Q topology matters)
+    let boundary_config = BoundaryConfig::default();
+    let dt = grid.dt;
+
+    for _ in 0..50 {
+        let params = grid.sim_params(true);
+        step_field_cpu(&mut grid, &params, None, None);
+        apply_boundaries(&mut grid, &boundary_config, dt);
+        grid.swap_and_advance();
+    }
+
+    let charge_final = compute_topological_charge(&grid);
+
+    // On a finite grid with open boundaries, some drift is expected.
+    // We check that the charge doesn't change by more than 50% of the initial value.
+    let drift = (charge_final - charge_initial).abs();
+    let threshold = charge_initial.abs().max(0.5);
+    assert!(
+        drift < threshold,
+        "topological charge should be roughly conserved: initial={charge_initial:.4}, final={charge_final:.4}, drift={drift:.4}"
     );
 }

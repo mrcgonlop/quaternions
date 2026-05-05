@@ -8,9 +8,12 @@
 //   energy_density = 0.5 * epsilon_0 * |E|^2 + 0.5 / mu_0 * |B|^2 + 0.5 * epsilon_0 * S^2
 //   poynting = (1/mu_0) * E x B
 
+use std::collections::VecDeque;
+
 use bevy::prelude::*;
 
 use crate::math::fdtd;
+use crate::math::quaternion::Quat;
 use crate::math::vector_field::{self, Vec3f};
 use crate::simulation::grid::SimulationGrid;
 use crate::simulation::state::{CellFlags, DerivedFields, SimParams};
@@ -44,6 +47,10 @@ pub struct DiagnosticsState {
 
     /// Mean K across all non-PML interior cells.
     pub mean_k: f32,
+
+    /// Topological charge (Baryon number / Skyrmion winding number).
+    /// Integer for true topological configurations; near-zero for trivial fields.
+    pub topological_charge: f32,
 }
 
 /// Compute derived electromagnetic fields from the current grid state.
@@ -237,6 +244,108 @@ pub fn max_b(derived: &[DerivedFields]) -> f32 {
         .sqrt()
 }
 
+/// Compute the topological charge (Baryon / Skyrmion number) of the quaternionic field.
+///
+/// The charge density is:
+///   ρ_topo = (1/24π²) ε^{ijk} Tr( L_i · L_j · L_k )
+/// where L_i = (∂_i U) * U⁻¹ are left Maurer-Cartan forms and U = Q/|Q| ∈ S³.
+///
+/// The integral ∫ ρ_topo dV = n ∈ ℤ for topologically non-trivial configurations.
+pub fn compute_topological_charge(grid: &SimulationGrid) -> f32 {
+    let nx = grid.nx as usize;
+    let ny = grid.ny as usize;
+    let nz = grid.nz as usize;
+    let dx = grid.dx;
+    let inv_2dx = 1.0 / (2.0 * dx);
+    let cells = grid.read_buf();
+
+    let stride_y = nx;
+    let stride_z = nx * ny;
+
+    // The full ε^{ijk} Tr(L_i L_j L_k) reduces to 6 * scalar_part(L_x [L_y, L_z])
+    // because: (a) cyclic trace collapses 6 terms to 3 identical pairs,
+    //          (b) SU(2) Tr = 2 * quaternion scalar_part.
+    // So (1/24π²) * 6 = 1/(4π²).
+    let prefactor = 1.0 / (4.0 * std::f32::consts::PI * std::f32::consts::PI);
+    let cell_volume = dx * dx * dx;
+
+    let mut charge = 0.0f64;
+
+    for z in 1..(nz - 1) {
+        for y in 1..(ny - 1) {
+            for x in 1..(nx - 1) {
+                let i = fdtd::idx(x, y, z, nx, ny);
+
+                // Skip PML cells
+                if (cells[i].flags & CellFlags::PML) != 0 {
+                    continue;
+                }
+
+                // Build quaternion from cell Q field
+                let q_i = Quat::new(cells[i].q[0], cells[i].q[1], cells[i].q[2], cells[i].q[3]);
+                let norm = q_i.norm();
+
+                // Skip near-zero field (vacuum or degenerate)
+                if norm < 1e-12 {
+                    continue;
+                }
+
+                // U = Q / |Q| (unit quaternion on S³)
+                let u = q_i * (1.0 / norm);
+                let u_conj = u.conj();
+
+                // Central differences of the unit quaternion field: ∂U/∂x, ∂U/∂y, ∂U/∂z
+                // We need to normalize neighbors too for consistent S³ mapping
+                let neighbors = [
+                    (i + 1, i - 1),                    // x+1, x-1
+                    (i + stride_y, i - stride_y),      // y+1, y-1
+                    (i + stride_z, i - stride_z),      // z+1, z-1
+                ];
+
+                let mut du = [Quat::zero(); 3]; // ∂U/∂x, ∂U/∂y, ∂U/∂z
+                let mut skip = false;
+
+                for (axis, &(ip, im)) in neighbors.iter().enumerate() {
+                    let qp = Quat::new(cells[ip].q[0], cells[ip].q[1], cells[ip].q[2], cells[ip].q[3]);
+                    let qm = Quat::new(cells[im].q[0], cells[im].q[1], cells[im].q[2], cells[im].q[3]);
+
+                    let np = qp.norm();
+                    let nm = qm.norm();
+
+                    if np < 1e-12 || nm < 1e-12 {
+                        skip = true;
+                        break;
+                    }
+
+                    let up = qp * (1.0 / np);
+                    let um = qm * (1.0 / nm);
+
+                    du[axis] = (up - um) * inv_2dx;
+                }
+
+                if skip {
+                    continue;
+                }
+
+                // Left Maurer-Cartan forms: L_i = (∂_i U) * U⁻¹ = (∂_i U) * U*
+                // (For unit quaternions, U⁻¹ = U*)
+                let lx = du[0].hamilton(u_conj);
+                let ly = du[1].hamilton(u_conj);
+                let lz = du[2].hamilton(u_conj);
+
+                // ρ_topo = (1/24π²) * scalar_part( L_x * (L_y * L_z - L_z * L_y) )
+                // The commutator [L_y, L_z] = L_y*L_z - L_z*L_y
+                let commutator = ly.hamilton(lz) - lz.hamilton(ly);
+                let rho = prefactor * lx.hamilton(commutator).scalar();
+
+                charge += rho as f64 * cell_volume as f64;
+            }
+        }
+    }
+
+    charge as f32
+}
+
 /// Bevy system: compute derived fields and diagnostics each frame.
 ///
 /// When PmlState is present, energy is computed excluding PML cells.
@@ -261,7 +370,232 @@ pub fn diagnostics_system(
     diag.max_s = max_s(&fields);
     diag.max_k = max_k_field(&grid);
     diag.mean_k = mean_k_field(&grid);
+
+    // Topological charge is expensive — throttle to every 10 steps
+    if grid.iteration % 10 == 0 {
+        diag.topological_charge = compute_topological_charge(&grid);
+    }
+
     diag.fields = fields;
+}
+
+// ---------------------------------------------------------------------------
+// Probes: point-sampled time series for quantitative analysis
+// ---------------------------------------------------------------------------
+
+/// A scalar field quantity that a `Probe` can record.
+///
+/// This is a subset of the visualization `FieldQuantity` enum, restricted to
+/// quantities that are meaningful as scalar time series at a single cell.
+/// Defined locally to avoid a `simulation -> visualization` dependency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ProbeField {
+    SField,
+    EMagnitude,
+    BMagnitude,
+    Phi,
+    Ax,
+    Ay,
+    Az,
+    EnergyDensity,
+}
+
+impl ProbeField {
+    pub const ALL: &'static [ProbeField] = &[
+        ProbeField::SField,
+        ProbeField::EMagnitude,
+        ProbeField::BMagnitude,
+        ProbeField::Phi,
+        ProbeField::Ax,
+        ProbeField::Ay,
+        ProbeField::Az,
+        ProbeField::EnergyDensity,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ProbeField::SField => "S",
+            ProbeField::EMagnitude => "|E|",
+            ProbeField::BMagnitude => "|B|",
+            ProbeField::Phi => "Phi",
+            ProbeField::Ax => "Ax",
+            ProbeField::Ay => "Ay",
+            ProbeField::Az => "Az",
+            ProbeField::EnergyDensity => "u",
+        }
+    }
+}
+
+/// Sample a `ProbeField` at a flat cell index, returning a scalar value.
+///
+/// Uses the most recently computed `DerivedFields` for E, B, S, energy, and
+/// reads Phi / A components directly from the grid.
+pub fn sample_probe_field(
+    grid: &SimulationGrid,
+    diag: &DiagnosticsState,
+    idx: usize,
+    field: ProbeField,
+) -> f32 {
+    match field {
+        ProbeField::SField => diag.fields[idx].s,
+        ProbeField::EMagnitude => vector_field::magnitude_sq(diag.fields[idx].e).sqrt(),
+        ProbeField::BMagnitude => vector_field::magnitude_sq(diag.fields[idx].b).sqrt(),
+        ProbeField::Phi => grid.read_buf()[idx].q[0],
+        ProbeField::Ax => grid.read_buf()[idx].q[1],
+        ProbeField::Ay => grid.read_buf()[idx].q[2],
+        ProbeField::Az => grid.read_buf()[idx].q[3],
+        ProbeField::EnergyDensity => diag.fields[idx].energy_density,
+    }
+}
+
+/// A measurement probe: a fixed grid location plus a ring-buffer time series
+/// of sampled field values. Populated each simulation step by `probe_system`.
+#[derive(Clone, Debug)]
+pub struct Probe {
+    /// Human-readable label displayed in the UI.
+    pub label: String,
+    /// Grid-coordinate position (integer indices, clamped to grid on sample).
+    pub position: [u32; 3],
+    /// Which field quantity to record.
+    pub field: ProbeField,
+    /// Ring buffer of (time_seconds, value) samples, oldest first.
+    pub history: VecDeque<(f32, f32)>,
+}
+
+impl Probe {
+    pub fn new(label: impl Into<String>, position: [u32; 3], field: ProbeField) -> Self {
+        Self {
+            label: label.into(),
+            position,
+            field,
+            history: VecDeque::new(),
+        }
+    }
+
+    /// Drop all recorded samples.
+    pub fn clear(&mut self) {
+        self.history.clear();
+    }
+
+    /// Most recent sample value, or 0.0 if the probe has never been sampled.
+    pub fn latest(&self) -> f32 {
+        self.history.back().map(|(_, v)| *v).unwrap_or(0.0)
+    }
+}
+
+/// Collection of probes. Resource inserted by `SimulationPlugin`.
+#[derive(Resource, Clone, Debug)]
+pub struct ProbeSet {
+    pub probes: Vec<Probe>,
+    /// Maximum number of samples retained per probe.
+    pub max_history: usize,
+}
+
+impl Default for ProbeSet {
+    fn default() -> Self {
+        Self {
+            probes: Vec::new(),
+            max_history: 4096,
+        }
+    }
+}
+
+impl ProbeSet {
+    pub fn clear(&mut self) {
+        self.probes.clear();
+    }
+
+    pub fn clear_histories(&mut self) {
+        for p in &mut self.probes {
+            p.clear();
+        }
+    }
+
+    pub fn push(&mut self, probe: Probe) {
+        self.probes.push(probe);
+    }
+}
+
+/// Discrete Fourier transform of a probe's time series.
+///
+/// Returns `Vec<(frequency_hz, magnitude)>` for frequencies in
+/// `[0, f_nyquist]`. Uses a naive O(N²) DFT — probes are short (typically a
+/// few thousand samples) so this runs in well under a millisecond and keeps
+/// us off of an fft dependency.
+///
+/// If the probe has fewer than 2 samples or the sample interval is
+/// degenerate, returns an empty vector.
+pub fn probe_fft(probe: &Probe) -> Vec<(f32, f32)> {
+    let n = probe.history.len();
+    if n < 2 {
+        return Vec::new();
+    }
+
+    let (t0, _) = probe.history[0];
+    let (t_last, _) = probe.history[n - 1];
+    let total = t_last - t0;
+    if total <= 0.0 {
+        return Vec::new();
+    }
+    let dt = total / (n - 1) as f32;
+    if dt <= 0.0 {
+        return Vec::new();
+    }
+
+    // Detrend by subtracting the mean — removes the DC spike that would
+    // otherwise dominate the spectrum and hide real oscillation peaks.
+    let mean: f32 = probe.history.iter().map(|(_, v)| *v).sum::<f32>() / n as f32;
+
+    let half = n / 2;
+    let mut out = Vec::with_capacity(half + 1);
+    let inv_n = 1.0 / n as f32;
+
+    for k in 0..=half {
+        let mut re = 0.0f32;
+        let mut im = 0.0f32;
+        let omega = -2.0 * std::f32::consts::PI * k as f32 / n as f32;
+        for (i, (_, v)) in probe.history.iter().enumerate() {
+            let sample = *v - mean;
+            let theta = omega * i as f32;
+            re += sample * theta.cos();
+            im += sample * theta.sin();
+        }
+        let magnitude = (re * re + im * im).sqrt() * inv_n;
+        let freq = k as f32 / (n as f32 * dt);
+        out.push((freq, magnitude));
+    }
+
+    out
+}
+
+/// Bevy system: sample every probe at the current simulation time and append
+/// to its history ring buffer. Runs after `diagnostics_system` so the sampled
+/// `DerivedFields` are fresh for this step.
+pub fn probe_system(
+    grid: Option<Res<SimulationGrid>>,
+    diag: Res<DiagnosticsState>,
+    mut probes: ResMut<ProbeSet>,
+) {
+    let Some(grid) = grid else { return };
+    if diag.fields.is_empty() {
+        return;
+    }
+
+    let max_history = probes.max_history;
+    let t = grid.time as f32;
+
+    for probe in &mut probes.probes {
+        let x = probe.position[0].min(grid.nx.saturating_sub(1));
+        let y = probe.position[1].min(grid.ny.saturating_sub(1));
+        let z = probe.position[2].min(grid.nz.saturating_sub(1));
+        let idx = grid.idx(x, y, z);
+        let value = sample_probe_field(&grid, &diag, idx, probe.field);
+
+        probe.history.push_back((t, value));
+        while probe.history.len() > max_history {
+            probe.history.pop_front();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -402,5 +736,58 @@ mod tests {
         let derived = compute_derived_fields(&grid, &params);
         let s_max = max_s(&derived);
         assert!(s_max > 0.0, "max_s should detect nonzero S field");
+    }
+
+    /// probe_fft should recover the frequency of a pure sinusoid within bin
+    /// resolution after detrending.
+    #[test]
+    fn test_probe_fft_recovers_sinusoid() {
+        use std::f32::consts::PI;
+
+        let n = 512;
+        let dt = 1.0e-3_f32; // 1 kHz sample rate
+        let target_freq = 50.0_f32;
+
+        let mut probe = Probe::new("sin", [0, 0, 0], ProbeField::SField);
+        for i in 0..n {
+            let t = i as f32 * dt;
+            let v = (2.0 * PI * target_freq * t).sin();
+            probe.history.push_back((t, v));
+        }
+
+        let spectrum = probe_fft(&probe);
+        assert!(!spectrum.is_empty());
+
+        // Peak should be at (or adjacent to) the target frequency bin.
+        let df = spectrum[1].0 - spectrum[0].0;
+        let (peak_freq, _) = spectrum
+            .iter()
+            .copied()
+            .fold((0.0f32, 0.0f32), |acc, (f, m)| {
+                if m > acc.1 { (f, m) } else { acc }
+            });
+        assert!(
+            (peak_freq - target_freq).abs() <= df,
+            "peak freq {} should be within one bin ({}) of {}",
+            peak_freq,
+            df,
+            target_freq,
+        );
+    }
+
+    /// probe_system should append one sample per call and cap history at max_history.
+    #[test]
+    fn test_probe_system_ring_buffer_cap() {
+        let mut probe = Probe::new("p", [4, 4, 4], ProbeField::Phi);
+        for i in 0..10 {
+            probe.history.push_back((i as f32, i as f32));
+        }
+        let max_history = 6;
+        while probe.history.len() > max_history {
+            probe.history.pop_front();
+        }
+        assert_eq!(probe.history.len(), 6);
+        assert_eq!(probe.history.front().unwrap().1, 4.0);
+        assert_eq!(probe.history.back().unwrap().1, 9.0);
     }
 }

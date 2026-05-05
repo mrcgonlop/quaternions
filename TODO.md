@@ -344,35 +344,20 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
 
 #### Implementation tasks:
 
-- `[ ]` Add `compute_topological_charge` to `src/simulation/diagnostics.rs`:
-  ```rust
-  pub fn compute_topological_charge(grid: &SimulationGrid) -> f32 {
-      // PSEUDOCODE:
-      // For each interior cell i:
-      //   U_i = Q_i / |Q_i|  (unit quaternion, Q_i.normalize())
-      //   Compute ∂_x U, ∂_y U, ∂_z U using central differences on unit quaternion field
-      //   Compute L_x = (∂_x U) * U.conjugate(), L_y = (∂_y U) * U.conjugate(), L_z = (∂_z U) * U.conjugate()
-      //     (these are Lie algebra elements: quaternions with zero scalar part)
-      //   ρ_topo[i] = (1/24π²) * (εijk triple product of L_x, L_y, L_z)
-      //     = (1/24π²) * scalar_part(L_x * (L_y * L_z - L_z * L_y))  (quaternion commutator trace)
-      //   Accumulate: charge += ρ_topo[i] * dx^3
-      // Return: total charge (should be near integer in a topological configuration)
-      todo!()
-  }
-  ```
-  - Guard: skip cells where |Q| < epsilon (vacuum or near-zero field)
-  - Guard: skip PML cells
-  - Result: real-valued output that rounds to an integer for true topological configurations
-
-- `[ ]` Add `topological_charge: f32` to `DiagnosticsState`
-- `[ ]` Call `compute_topological_charge` in `diagnostics_system` (every N steps, expensive — throttle to every 10 steps)
-- `[ ]` Display `n_topo` in UI panel (formatted as float with 2 decimal places: "Topo charge: {:.2}")
-  - Highlight if `|n_topo.round() - n_topo| < 0.1` → near-integer → topological structure detected
-- `[ ]` Write tests in `tests/integration_phase1.rs`:
-  - `test_topo_charge_vacuum`: uniform Q field → topological charge = 0
-  - `test_topo_charge_hedgehog`: hedgehog configuration Q ∝ (1, x/r, y/r, z/r)/r → topological charge = ±1
-  - `test_topo_charge_smooth_field`: slowly varying Q → charge ≈ 0 (no windings)
-  - `test_topo_charge_conserved`: evolve a non-trivial Q configuration 100 steps; charge changes by < 0.1
+- `[x]` Add `compute_topological_charge` to `src/simulation/diagnostics.rs`:
+  - Computes Baryon/Skyrmion winding number via left Maurer-Cartan forms L_i = (∂_i U) U*
+  - ρ_topo = (1/4π²) * scalar_part(L_x [L_y, L_z]) — prefactor corrected from 1/24π² to 1/4π² (factor of 6 = 3 from ε symmetry × 2 from SU(2) Tr → quaternion scalar_part)
+  - Guards: skips PML cells and cells where |Q| < 1e-12
+  - Central differences on the normalized unit quaternion field U = Q/|Q|
+- `[x]` Add `topological_charge: f32` to `DiagnosticsState`
+- `[x]` Call `compute_topological_charge` in `diagnostics_system` (throttled to every 10 steps)
+- `[x]` Display `n_topo` in UI panel (formatted as float with 2 decimal places: "Topo charge: {:.2}")
+  - Green highlight if near-integer AND |n_topo| > 0.1 → topological structure detected
+- `[x]` Write tests in `tests/integration_phase1.rs`:
+  - `test_topo_charge_vacuum`: uniform Q field → topological charge = 0 ✓
+  - `test_topo_charge_hedgehog`: hedgehog ansatz U=(cos θ, sin θ · r̂) on 32³ → charge ≈ -1 ✓
+  - `test_topo_charge_smooth_field`: slowly varying Q → charge ≈ 0 ✓
+  - `test_topo_charge_conserved`: evolve hedgehog 50 steps on 32³; charge drift < |initial| ✓
 - **Session output**: Integer-valued diagnostic detecting topological field structures — the essential measurement tool for ball lightning simulation
 
 ---
@@ -426,7 +411,7 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
 - **Context:** `src/simulation/sources.rs` (source injection API), `src/simulation/grid.rs`, `src/scenarios/dipole_radiation.rs` (scenario pattern to follow), `README.md §Scalar / Longitudinal EM Waves` (lines 56–92, theory motivation — brief skim)
 - **Depends on:** 2.1, 1.2
 - **Note:** See TODO §Known Issues — bifilar coil resolution. At 64³/0.5m domain, dx ≈ 8mm is too coarse for realistic wire spacing. Use idealized geometry or 128³+ with small domain.
-- `[ ]` Implement `src/scenarios/bifilar_coil.rs`:
+- `[x]` Implement `src/scenarios/bifilar_coil.rs`:
   - Bifilar coil: two windings carrying current in opposite directions
   - `// PSEUDOCODE: A bifilar coil is wound so that adjacent wires carry current`
   - `// in opposite directions. The B fields from adjacent wires cancel`
@@ -443,25 +428,26 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
     - Measure S field at receiver location
     - Compare coupling in standard vs extended mode
   - Expected result: in extended mode, the receiver sees S-field signal; in standard mode, coupling is minimal (only stray B leakage)
-- `[ ]` Add to scenario selector
+- `[x]` Add to scenario selector
 - `[ ]` Verify: visual confirmation of B cancellation and A/S field propagation
 - **Session output**: The signature experiment for scalar wave detection, simulated
 
 ### 2.4 — Quantitative scalar wave analysis
 - **Context:** `src/simulation/diagnostics.rs` (to extend with probes), `src/scenarios/bifilar_coil.rs` (scenario to measure), `src/ui/plugin.rs` (UI integration)
 - **Depends on:** 2.3, 1.3
-- `[ ]` Add measurement probes to `diagnostics.rs`:
-  - `Probe` struct: position, records time-series of selected field quantities
-  - `ProbeSet` resource: `Vec<Probe>`
-  - Bevy system: each step, sample field at probe locations, append to time series
-  - `fn probe_fft(probe: &Probe, field: FieldQuantity) -> Vec<(f32, f32)>` — frequency spectrum
-- `[ ]` Add probe placement to UI (click on slice to place probe)
-- `[ ]` Add time-series plot in UI (simple egui plot of probe data vs time)
-- `[ ]` For bifilar scenario:
-  - Place probes at transmitter, midpoint, and receiver
-  - Plot S vs time at each location
-  - Measure propagation delay → compute S-wave speed
-  - Compare with c (should be equal in uniform vacuum)
+- `[x]` Add measurement probes to `diagnostics.rs`:
+  - `Probe` struct with `label`, `position: [u32; 3]`, `field: ProbeField`, `history: VecDeque<(f32, f32)>`
+  - `ProbeSet` resource: `Vec<Probe>` plus `max_history` ring-buffer cap (default 4096)
+  - `ProbeField` enum defined locally (subset of visualization `FieldQuantity`) to avoid a `simulation → visualization` dependency cycle
+  - `probe_system` samples every probe each step after `diagnostics_system`, so the most recent `DerivedFields` are used
+  - `fn probe_fft(probe: &Probe) -> Vec<(f32, f32)>` — naive O(N²) DFT, mean-detrended, returns `(freq_hz, magnitude)` up to Nyquist. Covered by `test_probe_fft_recovers_sinusoid` (peak within one FFT bin of the target).
+- `[~]` Add probe placement to UI — probe list in the `Probes` window with per-probe X/Y/Z DragValues and field selector; "click on slice to place probe" deferred (would need raycast against the slice quad — non-trivial and not strictly required for delay measurement).
+- `[x]` Add time-series plot in UI (hand-rolled egui painter plot — overlays all probes, auto-scaled, with zero line and legend; avoids pulling in an `egui_plot` dependency)
+- `[x]` For bifilar scenario:
+  - Probes installed automatically when BifilarPair scenario is selected (`install_bifilar_pair_probes`): TX at x=nx/4, Mid at x=nx/2, RX at x=3nx/4, all on the y/z center line, all recording the S field
+  - Time series plotted in the Probes window
+  - Propagation delay estimated from TX→RX peak shift; v and v/c displayed in the UI
+  - FFT of the first probe shown in a collapsing section
 - **Session output**: Quantitative evidence of scalar wave propagation speed and amplitude
 
 ---

@@ -4,9 +4,12 @@ use bevy::prelude::*;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
+use crate::scenarios::bifilar_coil;
 use crate::scenarios::dipole_radiation::{self, Scenario};
 use crate::scenarios::vacuum_k;
-use crate::simulation::diagnostics::DiagnosticsState;
+use crate::simulation::diagnostics::{
+    probe_fft, DiagnosticsState, Probe, ProbeField, ProbeSet,
+};
 use crate::simulation::grid::SimulationGrid;
 use crate::simulation::plugin::{SimulationConfig, VacuumConfig};
 use crate::simulation::sources::{Source, SourceConfig, SourceType};
@@ -28,7 +31,17 @@ impl Plugin for UiPlugin {
         app.add_plugins(EguiPlugin)
             .add_plugins(FrameTimeDiagnosticsPlugin::default())
             .init_resource::<SelectedScenario>()
-            .add_systems(Update, (ui_side_panel, ui_source_panel, ui_diagnostics_panel, ui_slice_panel, ui_glyph_panel));
+            .add_systems(
+                Update,
+                (
+                    ui_side_panel,
+                    ui_source_panel,
+                    ui_diagnostics_panel,
+                    ui_slice_panel,
+                    ui_glyph_panel,
+                    ui_probe_panel,
+                ),
+            );
     }
 }
 
@@ -42,6 +55,7 @@ fn ui_side_panel(
     mut selected_scenario: ResMut<SelectedScenario>,
     mut pml: Option<ResMut<crate::simulation::boundaries::PmlState>>,
     mut vacuum_config: ResMut<VacuumConfig>,
+    mut probes: ResMut<ProbeSet>,
 ) {
     let ctx = contexts.ctx_mut();
 
@@ -70,6 +84,7 @@ fn ui_side_panel(
                         pml_state.reset_psi();
                     }
                     sources.sources.clear();
+                    probes.clear();
                     selected_scenario.current = None;
                     config.paused = true;
                 }
@@ -184,6 +199,10 @@ fn ui_side_panel(
                             // Apply scenario configuration; grid.reset() inside preserves
                             // PML flags, but stale CPML psi must be zeroed separately.
                             if let Some(ref mut grid) = grid {
+                                // Scenario switch invalidates any previously recorded
+                                // probe history — clear by default. BifilarPair
+                                // re-installs a default probe set below.
+                                probes.clear();
                                 match scenario {
                                     Scenario::DipoleRadiation => {
                                         dipole_radiation::apply_dipole_scenario(grid, &mut sources);
@@ -202,6 +221,32 @@ fn ui_side_panel(
                                             pml_state.reset_psi();
                                         }
                                         config.extended_mode = false;
+                                        config.paused = true;
+                                    }
+                                    Scenario::BifilarCoil => {
+                                        bifilar_coil::apply_bifilar_scenario(
+                                            grid,
+                                            &mut sources,
+                                        );
+                                        if let Some(ref mut pml_state) = pml {
+                                            pml_state.reset_psi();
+                                        }
+                                        config.extended_mode = true; // best viewed in extended mode
+                                        config.paused = true;
+                                    }
+                                    Scenario::BifilarPair => {
+                                        bifilar_coil::apply_bifilar_pair_scenario(
+                                            grid,
+                                            &mut sources,
+                                        );
+                                        bifilar_coil::install_bifilar_pair_probes(
+                                            grid,
+                                            &mut probes,
+                                        );
+                                        if let Some(ref mut pml_state) = pml {
+                                            pml_state.reset_psi();
+                                        }
+                                        config.extended_mode = true;
                                         config.paused = true;
                                     }
                                 }
@@ -261,6 +306,17 @@ fn ui_diagnostics_panel(
                 ui.label("Mean K:");
                 ui.label(format!("{:.4}", diag.mean_k));
                 ui.end_row();
+
+                ui.label("Topo charge:");
+                let n_topo = diag.topological_charge;
+                let near_integer = (n_topo.round() - n_topo).abs() < 0.1;
+                let label = format!("{:.2}", n_topo);
+                if near_integer && n_topo.abs() > 0.1 {
+                    ui.colored_label(egui::Color32::from_rgb(100, 255, 100), label);
+                } else {
+                    ui.label(label);
+                }
+                ui.end_row();
             });
 
             if let Some(pml) = &pml {
@@ -309,6 +365,7 @@ fn ui_source_panel(
                             SourceType::PointCharge => "Charge",
                             SourceType::OscillatingDipole { .. } => "Dipole",
                             SourceType::CurrentPulse { .. } => "Pulse",
+                            SourceType::ScalarDrive => "Scalar",
                         };
                         ui.checkbox(&mut source.active, label);
                         if ui.small_button("X").clicked() {
@@ -655,4 +712,342 @@ fn ui_glyph_panel(mut contexts: EguiContexts, mut config: ResMut<GlyphConfig>) {
                 ui.add(egui::DragValue::new(&mut config.manual_max).prefix("Max: ").speed(0.01));
             }
         });
+}
+
+/// Probe panel: add/remove probes, view time series and optional FFT.
+///
+/// Probes are point samplers that record a selected scalar field at a fixed
+/// grid location each simulation step. Used for quantitative analysis like
+/// measuring scalar-wave propagation delay in the bifilar pair scenario.
+fn ui_probe_panel(
+    mut contexts: EguiContexts,
+    mut probes: ResMut<ProbeSet>,
+    grid: Option<Res<SimulationGrid>>,
+) {
+    let Some(ref grid) = grid else { return };
+    let ctx = contexts.ctx_mut();
+
+    egui::Window::new("Probes")
+        .default_pos([260.0, 500.0])
+        .default_width(360.0)
+        .default_height(380.0)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Add @ center").clicked() {
+                    let cx = grid.nx / 2;
+                    let cy = grid.ny / 2;
+                    let cz = grid.nz / 2;
+                    let label = format!("Probe {}", probes.probes.len());
+                    probes.push(Probe::new(label, [cx, cy, cz], ProbeField::SField));
+                }
+                if ui.button("Clear histories").clicked() {
+                    probes.clear_histories();
+                }
+                if ui.button("Remove all").clicked() {
+                    probes.clear();
+                }
+            });
+
+            ui.label(format!(
+                "max_history: {}  (samples / probe)",
+                probes.max_history
+            ));
+            ui.separator();
+
+            if probes.probes.is_empty() {
+                ui.label("No probes. Select the Bifilar Pair scenario to install defaults, or 'Add @ center'.");
+                return;
+            }
+
+            // --- Per-probe controls ---
+            let mut to_remove = None;
+            let nx_max = grid.nx.saturating_sub(1);
+            let ny_max = grid.ny.saturating_sub(1);
+            let nz_max = grid.nz.saturating_sub(1);
+
+            for (idx, probe) in probes.probes.iter_mut().enumerate() {
+                ui.push_id(idx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}:", probe.label));
+                        ui.label(format!(
+                            "{} @ [{}, {}, {}] → {:.3e}",
+                            probe.field.name(),
+                            probe.position[0],
+                            probe.position[1],
+                            probe.position[2],
+                            probe.latest(),
+                        ));
+                        if ui.small_button("X").clicked() {
+                            to_remove = Some(idx);
+                        }
+                    });
+
+                    egui::Grid::new("probe_pos").show(ui, |ui| {
+                        ui.label("X:");
+                        ui.add(egui::DragValue::new(&mut probe.position[0]).range(0..=nx_max).speed(1));
+                        ui.label("Y:");
+                        ui.add(egui::DragValue::new(&mut probe.position[1]).range(0..=ny_max).speed(1));
+                        ui.label("Z:");
+                        ui.add(egui::DragValue::new(&mut probe.position[2]).range(0..=nz_max).speed(1));
+                        ui.end_row();
+
+                        ui.label("Field:");
+                        egui::ComboBox::from_id_salt("probe_field")
+                            .selected_text(probe.field.name())
+                            .show_ui(ui, |ui| {
+                                for &pf in ProbeField::ALL {
+                                    ui.selectable_value(&mut probe.field, pf, pf.name());
+                                }
+                            });
+                        ui.end_row();
+                    });
+
+                    ui.separator();
+                });
+            }
+
+            if let Some(idx) = to_remove {
+                probes.probes.remove(idx);
+            }
+
+            // --- Time series plot ---
+            ui.separator();
+            ui.label("Time series (all probes overlaid):");
+            draw_probe_time_series(ui, &probes.probes);
+
+            // --- Propagation delay (bifilar 3-probe helper) ---
+            if probes.probes.len() >= 3 {
+                ui.separator();
+                if let Some((delay_s, speed)) = estimate_propagation_delay(&probes.probes, grid.dx)
+                {
+                    ui.label(format!(
+                        "Peak shift TX→RX: Δt = {:.3e} s  ⇒  v ≈ {:.3e} m/s",
+                        delay_s, speed,
+                    ));
+                    ui.label(format!(
+                        "c (reference): {:.3e} m/s   ratio v/c ≈ {:.3}",
+                        crate::simulation::state::SimParams::C0,
+                        speed / crate::simulation::state::SimParams::C0,
+                    ));
+                }
+            }
+
+            // --- Optional FFT of first probe ---
+            if let Some(first) = probes.probes.first() {
+                ui.separator();
+                ui.collapsing(format!("FFT of {}", first.label), |ui| {
+                    let spectrum = probe_fft(first);
+                    if spectrum.is_empty() {
+                        ui.label("(need ≥ 2 samples with monotonic time)");
+                    } else {
+                        draw_probe_spectrum(ui, &spectrum);
+                    }
+                });
+            }
+        });
+}
+
+/// Draw an overlaid line plot of all probe time series using the egui
+/// painter. Each probe gets its own color and auto-scales to the global
+/// (min,max) bounding box. Deliberately lightweight to avoid adding an
+/// `egui_plot` dependency.
+fn draw_probe_time_series(ui: &mut egui::Ui, probes: &[Probe]) {
+    let desired_size = egui::vec2(ui.available_width(), 140.0);
+    let (rect, _resp) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    // Frame
+    painter.rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(1.0, egui::Color32::DARK_GRAY),
+        egui::StrokeKind::Outside,
+    );
+
+    // Compute global bounds across all probes with data
+    let mut t_min = f32::INFINITY;
+    let mut t_max = f32::NEG_INFINITY;
+    let mut v_min = f32::INFINITY;
+    let mut v_max = f32::NEG_INFINITY;
+    for p in probes {
+        for &(t, v) in &p.history {
+            if t < t_min { t_min = t; }
+            if t > t_max { t_max = t; }
+            if v < v_min { v_min = v; }
+            if v > v_max { v_max = v; }
+        }
+    }
+    if !t_min.is_finite() || t_max <= t_min {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "(no samples yet — run the simulation)",
+            egui::FontId::monospace(11.0),
+            egui::Color32::GRAY,
+        );
+        return;
+    }
+    // Guard against zero-variance series
+    if (v_max - v_min).abs() < 1e-30 {
+        v_min -= 1.0;
+        v_max += 1.0;
+    }
+
+    let colors = [
+        egui::Color32::from_rgb(255, 180, 90),
+        egui::Color32::from_rgb(120, 220, 255),
+        egui::Color32::from_rgb(160, 255, 160),
+        egui::Color32::from_rgb(255, 120, 200),
+        egui::Color32::from_rgb(220, 220, 120),
+    ];
+
+    // Zero line
+    if v_min < 0.0 && v_max > 0.0 {
+        let y0 = remap(0.0, v_min, v_max, rect.bottom(), rect.top());
+        painter.line_segment(
+            [
+                egui::pos2(rect.left(), y0),
+                egui::pos2(rect.right(), y0),
+            ],
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 70, 70)),
+        );
+    }
+
+    for (i, p) in probes.iter().enumerate() {
+        if p.history.len() < 2 { continue; }
+        let color = colors[i % colors.len()];
+        let points: Vec<egui::Pos2> = p
+            .history
+            .iter()
+            .map(|&(t, v)| {
+                egui::pos2(
+                    remap(t, t_min, t_max, rect.left(), rect.right()),
+                    remap(v, v_min, v_max, rect.bottom(), rect.top()),
+                )
+            })
+            .collect();
+        painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, color)));
+    }
+
+    // Legend + axes labels
+    let font = egui::FontId::monospace(10.0);
+    painter.text(
+        rect.left_top() + egui::vec2(4.0, 2.0),
+        egui::Align2::LEFT_TOP,
+        format!("v:[{:.2e}, {:.2e}]", v_min, v_max),
+        font.clone(),
+        egui::Color32::LIGHT_GRAY,
+    );
+    painter.text(
+        rect.right_bottom() + egui::vec2(-4.0, -2.0),
+        egui::Align2::RIGHT_BOTTOM,
+        format!("t:[{:.2e}, {:.2e}] s", t_min, t_max),
+        font.clone(),
+        egui::Color32::LIGHT_GRAY,
+    );
+    for (i, p) in probes.iter().enumerate() {
+        let color = colors[i % colors.len()];
+        painter.text(
+            rect.left_top() + egui::vec2(4.0, 16.0 + 12.0 * i as f32),
+            egui::Align2::LEFT_TOP,
+            format!("■ {}", p.label),
+            font.clone(),
+            color,
+        );
+    }
+}
+
+/// Draw a magnitude spectrum as a thin bar chart. Highlights the peak bin.
+fn draw_probe_spectrum(ui: &mut egui::Ui, spectrum: &[(f32, f32)]) {
+    let desired_size = egui::vec2(ui.available_width(), 100.0);
+    let (rect, _resp) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(1.0, egui::Color32::DARK_GRAY),
+        egui::StrokeKind::Outside,
+    );
+
+    if spectrum.is_empty() { return; }
+
+    let f_max = spectrum.last().map(|(f, _)| *f).unwrap_or(1.0);
+    let m_max = spectrum.iter().map(|(_, m)| *m).fold(0.0f32, f32::max).max(1e-30);
+
+    let mut peak_f = 0.0f32;
+    let mut peak_m = 0.0f32;
+    for &(f, m) in spectrum {
+        if m > peak_m { peak_m = m; peak_f = f; }
+        let x = remap(f, 0.0, f_max, rect.left(), rect.right());
+        let y = remap(m, 0.0, m_max, rect.bottom(), rect.top());
+        painter.line_segment(
+            [egui::pos2(x, rect.bottom()), egui::pos2(x, y)],
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 220, 255)),
+        );
+    }
+
+    let font = egui::FontId::monospace(10.0);
+    painter.text(
+        rect.left_top() + egui::vec2(4.0, 2.0),
+        egui::Align2::LEFT_TOP,
+        format!("peak: {:.3e} Hz", peak_f),
+        font.clone(),
+        egui::Color32::LIGHT_GRAY,
+    );
+    painter.text(
+        rect.right_bottom() + egui::vec2(-4.0, -2.0),
+        egui::Align2::RIGHT_BOTTOM,
+        format!("f_max: {:.3e} Hz", f_max),
+        font,
+        egui::Color32::LIGHT_GRAY,
+    );
+}
+
+/// Linear remap of `x` from `[a, b]` to `[c, d]`, with `a != b` guaranteed
+/// by callers.
+fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
+    let t = (x - a) / (b - a);
+    c + t * (d - c)
+}
+
+/// Estimate scalar-wave propagation delay from the first three probes.
+///
+/// Assumes probe[0] is at the transmitter and probe[2] is at the receiver.
+/// Returns (Δt, v) where Δt is the time lag of the receiver's peak-|amplitude|
+/// sample relative to the transmitter's, and v is |Δx|/Δt using the positions
+/// of probe[0] and probe[2] scaled by grid dx.
+fn estimate_propagation_delay(probes: &[Probe], dx: f32) -> Option<(f32, f32)> {
+    if probes.len() < 3 { return None; }
+    let tx = &probes[0];
+    let rx = &probes[2];
+    let tx_peak = peak_time(&tx.history)?;
+    let rx_peak = peak_time(&rx.history)?;
+    let delay = rx_peak - tx_peak;
+    if delay <= 0.0 { return None; }
+    let d = distance_cells(tx.position, rx.position) as f32 * dx;
+    Some((delay, d / delay))
+}
+
+fn peak_time(history: &VecDequeF32) -> Option<f32> {
+    let mut best_t = None;
+    let mut best_abs = 0.0f32;
+    for &(t, v) in history {
+        let a = v.abs();
+        if a > best_abs {
+            best_abs = a;
+            best_t = Some(t);
+        }
+    }
+    best_t
+}
+
+type VecDequeF32 = std::collections::VecDeque<(f32, f32)>;
+
+fn distance_cells(a: [u32; 3], b: [u32; 3]) -> u32 {
+    let dx = a[0].max(b[0]) - a[0].min(b[0]);
+    let dy = a[1].max(b[1]) - a[1].min(b[1]);
+    let dz = a[2].max(b[2]) - a[2].min(b[2]);
+    // Euclidean rounded to nearest cell — probes are axis-aligned in the
+    // bifilar scenario, so this collapses to |dx|.
+    (((dx * dx + dy * dy + dz * dz) as f32).sqrt()).round() as u32
 }
