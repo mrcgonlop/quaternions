@@ -6,13 +6,16 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
 use crate::scenarios::bifilar_coil;
 use crate::scenarios::dipole_radiation::{self, Scenario};
+use crate::scenarios::graneau_wire;
 use crate::scenarios::vacuum_k;
 use crate::simulation::diagnostics::{
     probe_fft, DiagnosticsState, Probe, ProbeField, ProbeSet,
 };
 use crate::simulation::grid::SimulationGrid;
+use crate::simulation::particles::ParticleSystem;
 use crate::simulation::plugin::{SimulationConfig, VacuumConfig};
 use crate::simulation::sources::{Source, SourceConfig, SourceType};
+use crate::simulation::weber::ForceMode;
 use crate::visualization::color_maps::{ColorEncoding, ColorMap, PhasePlane};
 use crate::visualization::glyphs::{GlyphConfig, GlyphField};
 use crate::visualization::slices::{AllSliceStats, FieldQuantity, SliceAxis, SliceConfigs, NUM_SLICES};
@@ -56,6 +59,8 @@ fn ui_side_panel(
     mut pml: Option<ResMut<crate::simulation::boundaries::PmlState>>,
     mut vacuum_config: ResMut<VacuumConfig>,
     mut probes: ResMut<ProbeSet>,
+    mut force_mode: ResMut<ForceMode>,
+    mut particle_system: ResMut<ParticleSystem>,
 ) {
     let ctx = contexts.ctx_mut();
 
@@ -85,6 +90,7 @@ fn ui_side_panel(
                     }
                     sources.sources.clear();
                     probes.clear();
+                    particle_system.clear();
                     selected_scenario.current = None;
                     config.paused = true;
                 }
@@ -98,6 +104,31 @@ fn ui_side_panel(
                 ui.selectable_value(&mut config.extended_mode, false, "Standard EM");
                 ui.selectable_value(&mut config.extended_mode, true, "QVED Extended");
             });
+
+            // --- Particle force law selector ---
+            ui.collapsing(
+                format!("Charged Particles ({})", particle_system.particles.len()),
+                |ui| {
+                    ui.label("Force law:");
+                    ui.horizontal(|ui| {
+                        for &mode in ForceMode::ALL {
+                            ui.selectable_value(force_mode.as_mut(), mode, mode.name());
+                        }
+                    });
+                    ui.label(match *force_mode {
+                        ForceMode::Lorentz => {
+                            "F = q(E + v × B), Boris pusher, fields from grid."
+                        }
+                        ForceMode::Weber => {
+                            "F = (q₁q₂/4πε₀r²)·r̂·[1 − ṙ²/2c² + r·r̈/c²]. \
+                             Direct pair sum, no field coupling."
+                        }
+                        ForceMode::Both => {
+                            "Lorentz + Weber applied additively each substep."
+                        }
+                    });
+                },
+            );
 
             ui.separator();
 
@@ -201,8 +232,10 @@ fn ui_side_panel(
                             if let Some(ref mut grid) = grid {
                                 // Scenario switch invalidates any previously recorded
                                 // probe history — clear by default. BifilarPair
-                                // re-installs a default probe set below.
+                                // re-installs a default probe set below. Likewise
+                                // clear particles; GraneauWire repopulates them.
                                 probes.clear();
+                                particle_system.clear();
                                 match scenario {
                                     Scenario::DipoleRadiation => {
                                         dipole_radiation::apply_dipole_scenario(grid, &mut sources);
@@ -247,6 +280,22 @@ fn ui_side_panel(
                                             pml_state.reset_psi();
                                         }
                                         config.extended_mode = true;
+                                        config.paused = true;
+                                    }
+                                    Scenario::GraneauWire => {
+                                        // Graneau is a particle-only scenario:
+                                        // no field sources, no PML transients,
+                                        // pure Weber pair force on the chain.
+                                        grid.reset();
+                                        sources.sources.clear();
+                                        if let Some(ref mut pml_state) = pml {
+                                            pml_state.reset_psi();
+                                        }
+                                        graneau_wire::apply_graneau_wire_default(
+                                            &mut particle_system,
+                                            &mut force_mode,
+                                        );
+                                        config.extended_mode = false;
                                         config.paused = true;
                                     }
                                 }

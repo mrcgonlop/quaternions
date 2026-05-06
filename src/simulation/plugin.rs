@@ -6,8 +6,10 @@ use crate::simulation::boundaries::{self, BoundaryConfig, PmlState};
 use crate::simulation::diagnostics::{self, DiagnosticsState, ProbeSet};
 use crate::simulation::field_update::step_field_cpu;
 use crate::simulation::grid::SimulationGrid;
+use crate::simulation::particles::{self, ParticleSystem};
 use crate::simulation::sources::{self, SourceConfig};
 use crate::simulation::state::PmlConfig;
+use crate::simulation::weber::{self, ForceMode};
 
 /// Polarizable vacuum (K field) configuration.
 ///
@@ -99,6 +101,8 @@ impl Plugin for SimulationPlugin {
             .init_resource::<BoundaryConfig>()
             .init_resource::<VacuumConfig>()
             .init_resource::<ProbeSet>()
+            .init_resource::<ParticleSystem>()
+            .init_resource::<ForceMode>()
             .add_systems(Startup, init_grid)
             .add_systems(
                 Update,
@@ -109,6 +113,7 @@ impl Plugin for SimulationPlugin {
                     boundaries::boundary_system,
                     diagnostics::diagnostics_system,
                     diagnostics::probe_system,
+                    particles::sync_particle_transforms,
                 )
                     .chain()
                     .in_set(SimulationSet),
@@ -155,6 +160,8 @@ fn simulation_step_system(
     source_config: Res<SourceConfig>,
     vacuum_config: Res<VacuumConfig>,
     pml: Option<ResMut<crate::simulation::boundaries::PmlState>>,
+    mut particles: ResMut<ParticleSystem>,
+    force_mode: Res<ForceMode>,
 ) {
     let Some(mut grid) = grid else { return };
 
@@ -169,6 +176,30 @@ fn simulation_step_system(
     let mut pml = pml;
     for _ in 0..step_count {
         let params = grid.sim_params_with_dt(config.extended_mode, effective_dt);
+        // Push particles using the field at time t BEFORE advancing it. After
+        // step_field_cpu + swap, the particles and the field will both be at
+        // t+dt, keeping their integration step-aligned.
+        if !particles.particles.is_empty() {
+            match *force_mode {
+                ForceMode::Lorentz => particles::step_particles(
+                    &mut particles.particles,
+                    &grid,
+                    params.c0,
+                    effective_dt,
+                ),
+                ForceMode::Weber => weber::step_particles_weber(
+                    &mut particles.particles,
+                    params.c0,
+                    effective_dt,
+                ),
+                ForceMode::Both => weber::step_particles_both(
+                    &mut particles.particles,
+                    &grid,
+                    params.c0,
+                    effective_dt,
+                ),
+            }
+        }
         sources::inject_sources(&mut grid, &source_config, &params);
         step_field_cpu(&mut grid, &params, pml.as_deref_mut(), Some(&*vacuum_config));
         grid.swap_and_advance_with_dt(effective_dt);

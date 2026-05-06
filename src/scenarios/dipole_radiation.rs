@@ -299,6 +299,9 @@ pub enum Scenario {
     BifilarCoil,
     /// Bifilar pair: transmitter + receiver for scalar wave coupling measurement.
     BifilarPair,
+    /// Graneau wire: chain of charged segments revealing Weber's longitudinal
+    /// force on a straight current-carrying wire. Forces Weber mode.
+    GraneauWire,
 }
 
 impl Scenario {
@@ -307,6 +310,7 @@ impl Scenario {
         Scenario::VacuumK,
         Scenario::BifilarCoil,
         Scenario::BifilarPair,
+        Scenario::GraneauWire,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -315,6 +319,7 @@ impl Scenario {
             Scenario::VacuumK => "Vacuum K (Polarizable Vacuum)",
             Scenario::BifilarCoil => "Bifilar Coil (Scalar Wave)",
             Scenario::BifilarPair => "Bifilar Pair (Tx/Rx)",
+            Scenario::GraneauWire => "Graneau Wire (Weber Longitudinal)",
         }
     }
 }

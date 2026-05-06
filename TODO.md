@@ -457,88 +457,60 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
 ### 3.1 — Discrete particle system
 - **Context:** `src/simulation/grid.rs` (grid interpolation for fields at particle positions), `src/simulation/diagnostics.rs` (DerivedFields for E, B at grid points), `ARCHITECTURE.md §Simulation Loop step 6` (lines 256–261, particle push overview)
 - **Depends on:** 1.3
-- `[ ]` Implement `src/simulation/particles.rs`:
-  - `ChargedParticle` Bevy component: charge (q), mass (m), position (Vec3), velocity (Vec3)
-  - `ParticleSystem` resource: collection of particles, integration method
-  - `fn spawn_particle(commands, charge, mass, position, velocity)` — creates ECS entity
-  - `fn update_particles_lorentz(particles, grid)`:
-    - For each particle: interpolate E, B at particle position from grid
-    - Lorentz force: F = q(E + v × B)
-    - Boris pusher for velocity update (standard stable EM particle pusher)
-    - Position update: x += v * dt
-    - `// PSEUDOCODE: Boris pusher algorithm:`
-    - `// 1. Half-step electric acceleration: v⁻ = v + (q*dt/2m)*E`
-    - `// 2. Rotation by B: t = (q*dt/2m)*B; s = 2t/(1+|t|²)`
-    - `//    v' = v⁻ + v⁻×t; v⁺ = v⁻ + v'×s`
-    - `// 3. Second half-step electric: v_new = v⁺ + (q*dt/2m)*E`
-    - `// 4. Position: x_new = x + v_new * dt`
-- `[ ]` Render particles as colored spheres in 3D scene
-- `[ ]` Verify: single particle in uniform E field accelerates linearly; particle in uniform B field gyrates
-- **Session output**: Particle system with standard Lorentz force, visualized
+- `[x]` Implement `src/simulation/particles.rs`:
+  - `ChargedParticle` ECS marker component carrying an index back into the resource (physics state lives in `ParticleSystem` so it can be borrowed inside `simulation_step_system`'s substep loop without crossing Bevy's Query borrow rules).
+  - `ParticleState { charge, mass, position, velocity, prev_acceleration }` — `prev_acceleration` is tracked now so Phase 3.2's explicit Weber scheme can read it without extra plumbing.
+  - `ParticleSystem` resource: `Vec<ParticleState>` plus `clear`/`push` helpers.
+  - `spawn_charged_particle(commands, particles, meshes, materials, state, radius, color)` — appends to the resource AND spawns a sphere-mesh entity in the 3D scene.
+  - `step_particles(particles, grid, c0, dt)` — Boris pusher: half-step E kick, magnetic rotation, second half-step E kick, position update; updates `prev_acceleration` from the velocity delta.
+  - `sample_e_b(grid, world_pos, c0)` — trilinear interpolation of E and B from the 8 surrounding cell centres, computing each corner's (E,B) via the same central-difference formulae as `diagnostics::compute_derived_fields`. Returns zero outside the safe interior region (≥ 2 cells from each face).
+  - World/grid convention is documented at the top of the module: domain centred on the origin, cell (i,j,k) centre at `((i+0.5)dx − half_x, …)`.
+- `[x]` Render particles as colored spheres in 3D scene — handled by `spawn_charged_particle` (icosphere mesh + emissive material) and the per-frame `sync_particle_transforms` system that copies positions from the resource into entity Transforms.
+- `[x]` Verify: tests in `src/simulation/particles.rs` — `test_uniform_e_field_accelerates_linearly` (closed-form qE/m drift, rel. err < 2 %), `test_uniform_b_field_gyrates` (cyclotron orbit closes within 5 % of gyroradius after one period), `test_zero_field_is_pure_drift`, `test_sample_e_b_outside_grid_returns_zero`.
+- Wiring: `ParticleSystem` is registered as a resource in `SimulationPlugin`; `step_particles` runs at the START of each substep inside `simulation_step_system` so particles see the field at time t before it advances; `sync_particle_transforms` runs in `SimulationSet` after diagnostics.
+- **Session output**: Particle system with standard Lorentz force via Boris pusher, GPU-renderable, and verified against analytic E-drift / B-gyration limits.
 
 ### 3.2 — Weber force implementation
 - **Context:** `src/simulation/particles.rs` (particle system to extend), `README.md §Weber Electrodynamics` (lines 96–140, Weber force theory derivation)
 - **Depends on:** 3.1
 - **Note:** See TODO §Known Issues — Weber acceleration bootstrapping uses previous-step acceleration (explicit scheme).
-- `[ ]` Implement `src/simulation/weber.rs`:
-  - `fn weber_force(q1, q2, r12, v12, a12) -> Vec3`:
-    - `r = |r12|; r_hat = r12 / r`
-    - `r_dot = dot(v12, r_hat)` — relative radial velocity
-    - `r_ddot = dot(a12, r_hat) + (|v12|² - r_dot²) / r` — relative radial acceleration
-    - `F = (q1*q2 / 4πε₀r²) * r_hat * [1 - r_dot²/(2c²) + r*r_ddot/c²]`
-    - `// PSEUDOCODE: The three terms:`
-    - `// Term 1: [1] — Coulomb repulsion/attraction`
-    - `// Term 2: [-r_dot²/(2c²)] — velocity correction (always reduces force)`
-    - `// Term 3: [+r*r_ddot/c²] — acceleration correction (can attract or repel)`
-    - `// The acceleration term is what produces longitudinal forces along current`
-    - `// For steady current in a wire, the drift velocity creates a systematic`
-    - `// r_dot between adjacent segments that produces a net longitudinal force`
-    - `// NOTE: The acceleration a12 requires knowing current-step acceleration,`
-    - `// which depends on the force we're computing (chicken-and-egg).`
-    - `// Resolution: use previous-step acceleration (explicit scheme). This is`
-    - `// first-order accurate and stable for v << c. If instabilities appear,`
-    - `// switch to a predictor-corrector: predict a(t+dt) from a(t), compute`
-    - `// force, then correct. For the Graneau scenario (steady drift), previous-`
-    - `// step acceleration is sufficient since a changes slowly.`
-  - `fn update_particles_weber(particles, grid)`:
-    - For each particle pair: compute Weber force (N² algorithm for now)
-    - Sum forces on each particle
-    - Same integration as Lorentz but with Weber force instead
-    - Option to compute BOTH and show comparison
-  - `ForceMode` enum: `Lorentz`, `Weber`, `Both` (shows side-by-side)
-- `[ ]` Add force mode toggle to UI
-- `[ ]` Unit tests:
-  - Two static charges: Weber force = Coulomb force (velocity terms vanish)
-  - Two charges moving apart: Weber force < Coulomb (velocity correction)
-  - Verify force is always along the line connecting charges (longitudinal)
-- **Session output**: Weber force calculation with tests proving correctness in known limits
+- `[x]` Implement `src/simulation/weber.rs`:
+  - `weber_force(q1, q2, r12, v12, a12, c0) -> [f32; 3]` — pure function returning the Weber force on particle 1 due to particle 2. Implements F = (q₁q₂/4πε₀r²)·r̂·[1 − ṙ²/(2c²) + r·r̈/c²] with ṙ = r̂·v₁₂ and r̈ = r̂·a₁₂ + (|v₁₂|² − ṙ²)/r.
+  - `compute_weber_forces(particles, c0) -> Vec<[f32; 3]>` — N² pair sum using Newton's third law: only iterates j > i and updates both forces[i] and forces[j], cutting pair count in half.
+  - `step_particles_weber(particles, c0, dt)` — kick-drift integrator: v_new = v + (F/m)·dt; x_new = x + v_new·dt. Updates `prev_acceleration = F/m` so the next step's r̈ term has it.
+  - `step_particles_both(particles, grid, c0, dt)` — Boris pusher then additive Weber kick (no extra drift since Boris already advanced position). Combines both accelerations into `prev_acceleration`.
+  - `ForceMode { Lorentz, Weber, Both }` enum + `Resource` registration; defaults to Lorentz so existing scenarios keep their behaviour.
+  - Explicit-scheme rationale documented at the top of the module: a₁₂ uses each particle's `prev_acceleration` field (set by either pusher) to break the chicken-and-egg.
+- `[x]` Add force mode toggle to UI — `Charged Particles (N)` collapsing section in the side panel: three-button selectable_value row + a description line explaining each mode's force law.
+- `[x]` Wire dispatch into `simulation_step_system`: matches on `*force_mode` inside the substep loop and routes to `step_particles` / `step_particles_weber` / `step_particles_both` so the chosen integrator runs for every substep against fresh-from-time-t fields.
+- `[x]` Unit tests in `src/simulation/weber.rs`:
+  - `test_weber_static_limit_equals_coulomb` — v=a=0 collapses the correction factor to 1; force matches Coulomb's law to 1e-5 rel. err.
+  - `test_weber_moving_apart_less_than_coulomb` — direct |F_W| < |F_C| comparison plus exact recovery of the analytic 1 − 2v²/c² factor (rel. err < 1e-3).
+  - `test_weber_force_along_r_hat` — F × r₁₂ vanishes regardless of v₁₂, a₁₂.
+  - `test_weber_newton_third_law` — F₁₂ + F₂₁ = 0 to 1e-5 rel. err.
+  - `test_step_particles_weber_two_charges_repel` — two like charges accelerate apart along the line of separation, transverse motion < 0.1 % of longitudinal, total momentum conserved.
+- Test scaling note: tests use unit charges + meter-scale separation. Elementary-charge scales (q ≈ 1.6e-19) push squared force magnitudes (~10⁻⁴⁴) into f32 subnormal range where the 2v²/c² ≈ 2e-5 correction is numerically lost — the underlying physics still works (the integrator uses the *vector* not magnitude²), but unit tests need the magnitude check in the normal f32 range to be meaningful.
+- **Session output**: Weber pair force law live and selectable from the UI; static-limit, velocity-correction, longitudinality, and Newton's-third-law symmetries all verified.
 
 ### 3.3 — Graneau wire scenario
 - **Context:** `src/simulation/weber.rs` (Weber force API), `src/simulation/particles.rs` (particle system), `src/scenarios/dipole_radiation.rs` (scenario pattern), `README.md §Weber Electrodynamics` (lines 96–140, Graneau experiment context)
 - **Depends on:** 3.2
 - **Note:** See TODO §Known Issues — Weber force magnitudes use scaled parameters. Document scaling factor.
-- `[ ]` Implement `src/scenarios/graneau_wire.rs`:
-  - Model a straight wire as a chain of N charged segments
-  - Each segment: positive ions (stationary) + electrons (drifting with velocity v_drift)
-  - Apply high pulse current → v_drift increases suddenly
-  - `fn setup_graneau_wire(commands, particles, grid)`:
-    - Create chain of positive charges (fixed) and negative charges (mobile) along a line
-    - Set electron drift velocity corresponding to desired current I
-    - `// PSEUDOCODE: For a wire of cross-section A with n electron density:`
-    - `// I = n * e * v_drift * A, so v_drift = I / (n * e * A)`
-    - `// For copper: n ≈ 8.5e28 /m³`
-    - `// For I = 10 kA, A = 1 mm²: v_drift ≈ 0.74 m/s`
-    - `// Weber correction terms scale as v_drift²/c² ≈ 6e-18 — tiny!`
-    - `// But the COLLECTIVE effect of ~10²³ charge pairs can sum to measurable force`
-    - `// The simulation uses scaled parameters to make forces visible`
-  - `fn compute_wire_force_profile(particles) -> Vec<(f32, Vec3)>`:
-    - For each segment, compute total Weber force (sum over all other segments)
-    - Return force magnitude along wire axis vs position
-    - Compare with Lorentz prediction (should be zero for straight wire — Lorentz gives no longitudinal force on a straight wire!)
-  - Expected result: Weber predicts nonzero longitudinal force that varies along wire length; Lorentz predicts zero
-- `[ ]` Visualize: wire segments colored by longitudinal force magnitude; arrow glyphs showing force direction
-- `[ ]` Add to scenario selector
-- **Session output**: Dramatic visual comparison — Weber predicts wire-breaking forces that Lorentz cannot explain
+- `[x]` Implement `src/scenarios/graneau_wire.rs`:
+  - `apply_graneau_wire_scenario(particles, force_mode, num_segments, spacing, v_drift)` — populates `ParticleSystem` with `num_segments` collocated (heavy ion at rest, light electron drifting at v_drift) pairs along x̂. Sets `*force_mode = ForceMode::Weber` because Lorentz gives identically zero on a straight wire from its own current.
+  - `apply_graneau_wire_default(particles, force_mode)` — convenience wrapper using the documented `DEFAULT_NUM_SEGMENTS = 21`, `DEFAULT_SEGMENT_SPACING = 1 cm`, `DEFAULT_DRIFT_VELOCITY = 1×10⁷ m/s`.
+  - `compute_wire_force_profile(particles) -> Vec<(f32, f32)>` — returns `(x_position, axial_Weber_force)` for each ion (even-indexed particle). Used by tests to verify the Weber prediction.
+  - Module header documents the analytic two-segment derivation: each segment pushes its neighbour AWAY along the wire axis with force magnitude `(q²/4πε₀L²)·(v_d²/c²)`. Sum over a uniform chain → end-peaked, antisymmetric profile (interior segments see balanced pushes from both sides).
+- Scaling note documented inline: real copper at 10 kA has v_drift ≈ 0.74 m/s, v²/c² ≈ 6e-18 — invisible in f32. Simulation uses v_drift = 1e7 m/s (~0.03 c, correction ~5e-4) so the longitudinal pattern is numerically resolvable. The QUALITATIVE pattern (end-peaked + antisymmetric) is preserved; absolute magnitudes are unphysical.
+- `[~]` Visualize: wire segments colored by longitudinal force magnitude; arrow glyphs showing force direction.
+  - Particles render as plain spheres via the Phase 3.1 `spawn_charged_particle` infrastructure, but the dedicated force-magnitude colouring + force arrow overlay is deferred. Required additions when reopened: a `WireForceProfile` resource cached each frame from `compute_wire_force_profile`, a render system that updates each ion sphere's material colour from a heat-map of |F_x|, and an egui plot of the profile vs. x in the side panel. None of these are blocking — the physics is testable from `cargo test`.
+- `[x]` Add to scenario selector — `Scenario::GraneauWire` in `dipole_radiation.rs::Scenario`, UI dropdown handler in `ui_side_panel` clears grid + sources + PML + probes + particles, calls `apply_graneau_wire_default`, leaves `extended_mode = false` (Weber is field-free) and starts paused.
+- `[x]` Tests in `src/scenarios/graneau_wire.rs`:
+  - `test_apply_graneau_wire_scenario_creates_chain` — particle count = 2N, ions at rest at correct positions, electrons drift in +x̂, total charge ≈ 0, force_mode set to Weber.
+  - `test_graneau_force_profile_outward_at_ends` — leftmost ion F_x < 0, rightmost F_x > 0, middle |F_x| < 1 % of end |F_x|, antisymmetry < 1e-3, end |F| > 1e6 N (well above noise floor).
+  - `test_graneau_force_increases_toward_ends` — |F_x| grows monotonically from centre outward (rules out flat or noise-dominated profiles).
+  - `test_graneau_no_axial_force_without_pair_law` — with v_drift = 0 the Weber correction vanishes, leaving pure Coulomb on a charge-neutral chain → every ion sees ≈ 0 net force. This is the null result that Weber measurably DEPARTS from when v_drift > 0.
+- **Session output**: Graneau wire scenario live in the UI; the signature Weber prediction (end-peaked, antisymmetric axial force on a uniform straight wire) is verified by tests against the analytic two-segment derivation.
 
 ### 3.4 — Force visualization overlays
 - **Context:** `src/simulation/diagnostics.rs` (DerivedFields with E, B, Poynting), `src/visualization/color_maps.rs`, `src/simulation/grid.rs` (grid sampling), `ARCHITECTURE.md §Visualization Modes` (lines 396–406, glyph/arrow overview)
@@ -1093,6 +1065,7 @@ These are non-blocking inconsistencies or scope questions to revisit as the rele
 - **Casimir scenario (Phase 4.2):** The Casimir effect is fundamentally quantum (zero-point fluctuations). Our classical FDTD with random initial conditions is NOT equivalent to quantum vacuum. The simulation demonstrates the *mechanism* (boundary-constrained modes → K gradient → force) rather than producing quantitative Casimir predictions. The random initialization spectrum is artificial — document this clearly in the scenario.
 - **Aharonov-Bohm scenario (Phase 7.1):** The AB effect is quantum phase interference. Our simulation can demonstrate that A != 0 where B = 0 (purely classical potential structure) and compute path integrals of A, but it cannot simulate the actual electron wavefunction interference. Scope is "demonstrate potential structure and compute phase-relevant integrals," not "simulate the AB effect."
 - **S field as derived vs evolved:** ~~RESOLVED~~ In the original Phase 1 stub, S was a derived quantity (Lorenz gauge formula). As of Phase 1.7, S is fully independently evolved via its own □S = 0 leapfrog in `field_update.rs`, stored in double-buffered `grid.s_field`, and read directly by `diagnostics.rs` in extended mode. This is true QVED (α=1.0) with no gauge constraint on S.
+- **Phase 4.1 vs Phase 1.8 — vacuum K dynamics:** The K-field evolution originally scoped for Phase 4.1 in `src/simulation/vacuum_update.rs` was implemented earlier in Phase 1.8 directly inside `step_field_cpu` (`src/simulation/field_update.rs`), driven by the `VacuumConfig` resource. The `vacuum_update.rs` module remains as a 1-line stub and should be removed (or repurposed for Phase 4.2 Casimir) when Phase 4 is opened. Phase 4.1 is effectively complete; only Phase 4.2 (Casimir) and Phase 4.3 (vacuum lensing scenario) remain.
 
 ### Resolution & Scale
 - **Bifilar coil resolution:** A realistic bifilar coil has ~1mm wire spacing. At 64³ with 0.5m domain, dx ≈ 8mm — too coarse. Either use a fine grid (128³+ with small domain) or idealize the coil as a current sheet. Note this in the bifilar scenario setup.
