@@ -18,12 +18,26 @@ use crate::simulation::sources::{Source, SourceConfig, SourceType};
 use crate::simulation::weber::ForceMode;
 use crate::visualization::color_maps::{ColorEncoding, ColorMap, PhasePlane};
 use crate::visualization::glyphs::{GlyphConfig, GlyphField};
-use crate::visualization::slices::{AllSliceStats, FieldQuantity, SliceAxis, SliceConfigs, NUM_SLICES};
+use crate::visualization::slices::{
+    self, AllSliceStats, FieldQuantity, SliceAxis, SliceConfigs, NUM_SLICES,
+};
+use crate::visualization::streamlines::StreamlineConfig;
+use crate::visualization::volume::VolumeConfig;
 
 /// Tracks which scenario is currently selected in the UI.
 #[derive(Resource, Default)]
 struct SelectedScenario {
     current: Option<Scenario>,
+}
+
+/// Stable egui texture handles for the slice 2D inset images.
+///
+/// Egui requires a `TextureHandle` whose lifetime spans frames; recreating
+/// it via `ctx.load_texture` every frame allocates a new GPU texture each
+/// time. We keep one handle per slice and call `set` on it instead.
+#[derive(Resource, Default)]
+struct SliceUiTextures {
+    handles: [Option<egui::TextureHandle>; NUM_SLICES],
 }
 
 /// Plugin that adds bevy_egui and the simulation control panels.
@@ -34,6 +48,7 @@ impl Plugin for UiPlugin {
         app.add_plugins(EguiPlugin)
             .add_plugins(FrameTimeDiagnosticsPlugin::default())
             .init_resource::<SelectedScenario>()
+            .init_resource::<SliceUiTextures>()
             .add_systems(
                 Update,
                 (
@@ -42,6 +57,8 @@ impl Plugin for UiPlugin {
                     ui_diagnostics_panel,
                     ui_slice_panel,
                     ui_glyph_panel,
+                    ui_streamline_panel,
+                    ui_volume_panel,
                     ui_probe_panel,
                 ),
             );
@@ -457,7 +474,9 @@ fn ui_slice_panel(
     mut contexts: EguiContexts,
     mut configs: ResMut<SliceConfigs>,
     grid: Option<Res<SimulationGrid>>,
+    diag: Res<DiagnosticsState>,
     stats: Res<AllSliceStats>,
+    mut ui_textures: ResMut<SliceUiTextures>,
 ) {
     let ctx = contexts.ctx_mut();
 
@@ -597,6 +616,47 @@ fn ui_slice_panel(
                             });
                         }
 
+                        // Show-in-3D toggle (default off — slice is now a
+                        // 2D inset only). The 3D quad competes visually with
+                        // the volume render and is rarely useful in 3D.
+                        ui.separator();
+                        ui.checkbox(&mut cfg.show_in_3d, "Show 3D quad in scene");
+
+                        // 2D inset image — the live slice rendered into the
+                        // panel. Computed every frame from the same helper
+                        // the 3D-quad path uses, so they stay in sync.
+                        ui.separator();
+                        if let Some(ref grid_ref) = grid {
+                            if !diag.fields.is_empty() {
+                                let cfg_snapshot = cfg.clone();
+                                let (rgba, w, h, _) = slices::compute_slice_pixels(
+                                    grid_ref,
+                                    &diag,
+                                    &cfg_snapshot,
+                                );
+                                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                                    [w as usize, h as usize],
+                                    &rgba,
+                                );
+                                match &mut ui_textures.handles[si] {
+                                    Some(handle) => {
+                                        handle.set(color_image, egui::TextureOptions::LINEAR);
+                                    }
+                                    slot @ None => {
+                                        *slot = Some(ctx.load_texture(
+                                            format!("slice_inset_{si}"),
+                                            color_image,
+                                            egui::TextureOptions::LINEAR,
+                                        ));
+                                    }
+                                }
+                                if let Some(handle) = &ui_textures.handles[si] {
+                                    let inset_size = egui::vec2(180.0, 180.0);
+                                    ui.image((handle.id(), inset_size));
+                                }
+                            }
+                        }
+
                         // Stats display
                         ui.separator();
                         let st = &stats.stats[si];
@@ -645,11 +705,20 @@ fn ui_glyph_panel(mut contexts: EguiContexts, mut config: ResMut<GlyphConfig>) {
                 egui::Slider::new(&mut config.stride, 1..=8).text("Stride"),
             );
 
-            // Scale (logarithmic)
+            // Scale (cell widths at the auto-range reference magnitude).
+            // 0.5 means a "typical" arrow is half a cell long; outliers grow
+            // proportionally but stay bounded relative to the grid.
             ui.add(
-                egui::Slider::new(&mut config.scale, 1e-6..=1.0)
-                    .logarithmic(true)
-                    .text("Scale"),
+                egui::Slider::new(&mut config.scale, 0.05..=3.0)
+                    .text("Scale (cells at p95)"),
+            );
+
+            // Auto-range percentile — clips the top (1 - p) fraction of the
+            // magnitude distribution so a single source spike doesn't compress
+            // every other arrow into invisibility.
+            ui.add(
+                egui::Slider::new(&mut config.auto_range_percentile, 0.5..=1.0)
+                    .text("Auto-range percentile"),
             );
 
             ui.separator();
@@ -760,6 +829,161 @@ fn ui_glyph_panel(mut contexts: EguiContexts, mut config: ResMut<GlyphConfig>) {
                 ui.add(egui::DragValue::new(&mut config.manual_min).prefix("Min: ").speed(0.01));
                 ui.add(egui::DragValue::new(&mut config.manual_max).prefix("Max: ").speed(0.01));
             }
+        });
+}
+
+/// Streamline panel: RK4-traced field lines with optional animated tracers.
+///
+/// Phase 6.2 — primary 3D vector view, replaces arrow glyphs as the default
+/// way to read a vector field. Each seed point traces forward along the
+/// field direction using 4th-order Runge-Kutta; the polyline is coloured by
+/// local magnitude. Tracer dots flow along the line over time so direction
+/// is readable at a glance.
+fn ui_streamline_panel(
+    mut contexts: EguiContexts,
+    mut config: ResMut<StreamlineConfig>,
+) {
+    let ctx = contexts.ctx_mut();
+
+    egui::Window::new("Streamlines")
+        .default_pos([800.0, 540.0])
+        .default_width(240.0)
+        .show(ctx, |ui| {
+            ui.checkbox(&mut config.enabled, "Enabled");
+            if !config.enabled {
+                return;
+            }
+
+            // Vector field selector (same set as glyphs).
+            let field_name = config.field.name();
+            egui::ComboBox::from_label("Field")
+                .selected_text(field_name)
+                .show_ui(ui, |ui| {
+                    for &gf in GlyphField::ALL {
+                        ui.selectable_value(&mut config.field, gf, gf.name());
+                    }
+                });
+
+            ui.add(
+                egui::Slider::new(&mut config.seed_stride, 2..=12).text("Seed stride"),
+            );
+            ui.add(
+                egui::Slider::new(&mut config.max_steps, 16..=512).text("Max steps"),
+            );
+            ui.add(
+                egui::Slider::new(&mut config.step_fraction, 0.1..=1.0)
+                    .text("Step (×dx)"),
+            );
+
+            ui.separator();
+
+            // Colour map.
+            let map_name = config.color_map.name();
+            egui::ComboBox::from_label("Color map")
+                .selected_text(map_name)
+                .show_ui(ui, |ui| {
+                    for &cm in ColorMap::ALL {
+                        ui.selectable_value(&mut config.color_map, cm, cm.name());
+                    }
+                });
+            ui.checkbox(&mut config.auto_range, "Auto range");
+            if !config.auto_range {
+                ui.add(
+                    egui::DragValue::new(&mut config.manual_max)
+                        .prefix("Max: ")
+                        .speed(0.01),
+                );
+            }
+
+            ui.separator();
+
+            // Animated tracer controls.
+            ui.checkbox(&mut config.animate_tracers, "Animated tracers");
+            if config.animate_tracers {
+                ui.add(
+                    egui::Slider::new(&mut config.tracers_per_line, 0..=6)
+                        .text("Tracers / line"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut config.tracer_speed, 0.05..=2.0)
+                        .text("Tracer speed"),
+                );
+            }
+        });
+}
+
+/// Volume rendering panel — primary 3D scalar view (Phase 6.1).
+///
+/// Stack of axis-aligned semi-transparent slabs. Signed scalars (S, φ, A_*)
+/// auto-render with a bipolar blue/white/red transfer function; positive
+/// scalars (|E|, |B|, K, energy density) use a configurable sequential
+/// palette. Best viewed roughly along ±Z; edge-on views collapse the slabs.
+fn ui_volume_panel(
+    mut contexts: EguiContexts,
+    mut config: ResMut<VolumeConfig>,
+) {
+    let ctx = contexts.ctx_mut();
+
+    egui::Window::new("Volume")
+        .default_pos([800.0, 60.0])
+        .default_width(240.0)
+        .show(ctx, |ui| {
+            ui.checkbox(&mut config.enabled, "Enabled");
+            if !config.enabled {
+                return;
+            }
+
+            // Scalar field selector (full FieldQuantity list — sign auto-
+            // dispatches to the correct transfer function).
+            let field_name = config.field.name();
+            egui::ComboBox::from_label("Field")
+                .selected_text(field_name)
+                .show_ui(ui, |ui| {
+                    for &fq in FieldQuantity::ALL {
+                        ui.selectable_value(&mut config.field, fq, fq.name());
+                    }
+                });
+            ui.label(if config.field.is_signed() {
+                "Transfer: bipolar (blue / clear / red)"
+            } else {
+                "Transfer: sequential (palette + opacity ramp)"
+            });
+
+            ui.add(
+                egui::Slider::new(&mut config.num_slabs, 4..=64).text("Slabs"),
+            );
+            ui.add(
+                egui::Slider::new(&mut config.opacity_scale, 0.05..=2.0)
+                    .text("Opacity scale"),
+            );
+
+            ui.separator();
+
+            // Sequential-only controls (the bipolar transfer function uses
+            // a hand-coded palette that ignores ColorMap).
+            if !config.field.is_signed() {
+                let map_name = config.color_map.name();
+                egui::ComboBox::from_label("Color map")
+                    .selected_text(map_name)
+                    .show_ui(ui, |ui| {
+                        for &cm in ColorMap::ALL {
+                            ui.selectable_value(&mut config.color_map, cm, cm.name());
+                        }
+                    });
+            }
+
+            ui.checkbox(&mut config.auto_range, "Auto range");
+            if !config.auto_range {
+                ui.add(
+                    egui::DragValue::new(&mut config.manual_max)
+                        .prefix("Max: ")
+                        .speed(0.01),
+                );
+            }
+            ui.checkbox(
+                &mut config.exclude_pml_from_range,
+                "Exclude PML from range",
+            );
         });
 }
 

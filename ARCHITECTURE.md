@@ -396,6 +396,22 @@ This is a simplified version — the production shader would include PML boundar
 
 ## Visualization Architecture
 
+### Design principle: one visual language per data type
+
+The simulation produces values of three structurally different kinds. Each gets its OWN visual language; mixing them in a single mode (e.g. magnitude-coloured slice for everything) loses the structure that distinguishes them.
+
+| Data type            | Examples                       | Visual language                                                                                  |
+|----------------------|--------------------------------|--------------------------------------------------------------------------------------------------|
+| **Signed scalar**    | S, φ, ∇·A                      | Bipolar volume render (blue = negative, transparent = zero, red = positive); opacity ∝ \|value\|.   |
+| **Positive scalar**  | \|E\|, \|B\|, K, energy density    | Sequential volume render with perceptual palette (viridis/plasma); opacity ramps with magnitude. |
+| **Vector field**     | E, B, Poynting, A              | RK4 streamlines coloured by magnitude; optionally animated tracer particles flowing along them.  |
+
+Three rules follow:
+
+1. **Slices are demoted from primary 3D view to diagnostic 2D inset.** A textured quad floating in the 3D scene is good for "what is the value at z = 0.05 m?" but bad for "what does the field look like in 3D?" — it projects away one of the three dimensions of the data we care about. The slice panel becomes a 2D side-panel readout, leaving the 3D scene to volume rendering and streamlines.
+2. **Arrow glyphs are not the primary vector view.** Arrow density needed for understanding a 3D vector field collapses into occluded clutter; sparse density misses structure. Streamlines win for topology; arrow glyphs survive only as sparse overlays at probe points or seed locations.
+3. **Quaternion Q is never visualised directly.** With four components per cell, no single 3D scheme captures it without arbitrary choices. Always derive E, B, S from Q (already done in `compute_derived_fields`) and visualise the derived quantities with the languages above.
+
 ### Visualization Modes
 
 The simulator supports multiple simultaneous visualization modes, toggled and configured through the egui panel:

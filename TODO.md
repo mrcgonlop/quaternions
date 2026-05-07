@@ -675,10 +675,33 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
 
 ## Phase 6: Advanced Visualization
 
-### 6.1 — Volume rendering
-- **Context:** `ARCHITECTURE.md §Visualization Modes` (lines 381–385, volume render description), `src/visualization/color_maps.rs` (transfer function base), `src/gpu/buffers.rs` (3D texture from derived fields)
-- **Depends on:** 5.4
-- `[ ]` Implement `src/visualization/volume.rs`:
+> **Visualization redesign (recorded 2026-05).** Phases 0–3 used slice planes + arrow glyphs as the primary 3D viz. Both have proven weak: slices project away one of the three dimensions of the data we want to see, and arrow density needed for understanding a 3D vector field collapses into occluded clutter. Phase 6 is the recovery plan, organised around one visual language per data type. See `ARCHITECTURE.md §Visualization Architecture / Design principle` for the underlying rule. Subtasks below are reordered to deliver vector improvements first (no shader work needed) and scalar improvements second (custom WGSL).
+
+### 6.0 — Glyph triage and slice demotion (preparatory)
+- **Context:** `src/visualization/glyphs.rs`, `src/visualization/slices.rs`, `src/visualization/plugin.rs`, `src/ui/plugin.rs` (panels)
+- **Depends on:** none — this is preparatory cleanup before the redesign lands.
+- `[x]` Glyph triage. Three concrete issues found and fixed in `src/visualization/glyphs.rs`:
+  - **Outlier-sensitive auto-range** (root cause of "doesn't plot" in dipole/bifilar): `max_mag = max(samples)` was dominated by the strong source cell, then the `mag < max_mag * 1e-4` skip threshold filtered out nearly every other arrow. **Fix:** use the `auto_range_percentile`-th percentile (default 95th) of the magnitude distribution as the reference, so source spikes saturate but don't compress the bulk field below visibility. New `percentile_of` helper covered by 3 unit tests including an outlier-suppression scenario.
+  - **Wrong scale in `RgbMultiField` and `SizeColor` encodings** (correctness bug): both encodings were normalising scalar channels (S, φ, |B|, etc.) against `max_mag`, which is the VECTOR field's magnitude max. Scalars with very different magnitudes saturated or went black. **Fix:** compute per-channel percentile maxes from the same sample set (`scalar_p95` closure) and pass them as the per-channel range to `encode_rgb_multi` / `map_value`.
+  - **Unit-naive `scale` default** (quality of life): old `scale = 0.001` is meaningless without knowing the field units. **Fix:** scale is now in cell-widths-at-the-percentile-reference, so `scale = 0.5` means a typical arrow is half a cell long regardless of physical units. UI slider relabelled "Scale (cells at p95)" with range 0.05..=3.0.
+  - UI also gains an "Auto-range percentile" slider (0.5..=1.0, default 0.95) so the user can tune outlier suppression per-scenario.
+- `[x]` Demote slices: implemented. `SingleSliceConfig` gained `show_in_3d: bool` (default `false`). `manage_slice_entity` only spawns the 3D textured quad when `show_in_3d == true`; otherwise the slice is purely a 2D inset image inside the `Slice Planes` egui panel. The RGBA-computation logic was extracted from `update_slice_texture` into the public `slices::compute_slice_pixels` helper so both paths (3D-quad upload AND egui inset) share one source of truth. A `SliceUiTextures` resource holds stable `egui::TextureHandle`s across frames so the inset image doesn't allocate a new GPU texture every frame.
+- **Session output**: Glyph implementation fixed (3 concrete bugs). Arrows should now read sensibly in scenarios with strong sources. Glyphs remain a fundamentally limited primary vector view — 6.2 (RK4 streamlines) is still the right replacement — but they now work correctly for sparse-overlay use.
+
+### 6.1 — Volume rendering for scalars (signed AND positive)
+- **Context:** `ARCHITECTURE.md §Visualization Architecture / Design principle` (the three-language rule), `src/visualization/color_maps.rs` (transfer function base), eventually `src/gpu/buffers.rs` (GPU 3D textures once Phase 5 lands)
+- **Depends on:** 1.3 for CPU prototype; 5.4 for GPU port.
+- **Two transfer functions, one renderer.** Signed scalars (S, φ) get a bipolar transfer function — blue = negative, transparent = zero, red = positive, opacity ∝ |value|. Positive scalars (|E|, |B|, K, energy density) get a sequential transfer function — viridis/plasma palette, opacity ramping from 0 at zero to opaque at max. The ray-marching code is shared; only the transfer function differs.
+- `[x]` CPU prototype implemented as **stacked semi-transparent slabs** (not full ray-marching — picked the simpler approach that needed no shader work and shipped in one session). `src/visualization/volume.rs`:
+  - `VolumeConfig` resource: scalar field selector, num_slabs, opacity_scale, auto_range, color_map (sequential), exclude_pml_from_range.
+  - `transfer_bipolar` and `transfer_sequential` pure helpers (10 unit tests covering boundary values, clamping, opacity scaling, dispatch).
+  - `manage_volume_entities` spawns N axis-aligned semi-transparent quads at evenly spaced Z positions; respawns when `enabled` or `num_slabs` change.
+  - `update_volume_textures` rebuilds each slab's texture every frame using the same dynamic-image swap pattern as `slices.rs`. Picks the correct transfer function from `FieldQuantity::is_signed`.
+  - `slab_z_indices` distributes slabs evenly across `[0, nz)` and dedups when more slabs are requested than the grid has layers.
+  - `ui_volume_panel` in `src/ui/plugin.rs` exposes all controls; auto-hides the colour-map dropdown for signed fields (bipolar uses a hand-coded blue/white/red).
+- Known limitation documented in the module header: edge-on view (camera in the xy-plane) collapses the slab stack to lines. View-aligned slab orientation per frame is the natural polish; deferred to GPU port.
+- `[ ]` GPU port (deferred until 5.x): `assets/shaders/volume_render.wgsl` — full ray-marching with view-aligned sampling, freed from the slab-edge-on limitation. The transfer-function logic ports verbatim from `transfer_bipolar` / `transfer_sequential`.
+- Reference shader sketch:
   - Create `assets/shaders/volume_render.wgsl`:
     - Ray-march from camera through 3D texture
     - Sample field quantity at regular intervals along ray
@@ -690,39 +713,28 @@ When starting a session, follow this workflow (also described in `CLAUDE.md`):
     - `// 4. Map field value → (color, opacity) via transfer function`
     - `// 5. Composite: accumulated_color += (1 - accumulated_alpha) * sample_color * sample_alpha`
     - `// 6. Early termination if accumulated_alpha > 0.99`
-  - Transfer function: maps field value → (color, opacity)
-    - Configurable via egui curve editor or presets
-    - For S field: make zero transparent, positive/negative opaque with different colors
-    - For |E|: transparent at low values, opaque at high values
-  - Bevy custom render pipeline using a fullscreen quad with the ray-march shader
-- `[ ]` Add volume render toggle and transfer function controls to UI
-- `[ ]` Verify: 3D radiation pattern visible as glowing volume
-- **Session output**: Gorgeous 3D visualization of propagating electromagnetic fields
+  - Bevy custom render pipeline using a fullscreen quad with the ray-march shader.
+- `[ ]` Add volume-render UI controls: scalar quantity selector (one of S / φ / |E| / |B| / K / energy density), transfer-function preset (bipolar vs. sequential picked automatically from the quantity), opacity scale, sample-step size.
+- `[ ]` Verify: dipole scenario shows |E| as a glowing radiating volume; bifilar-pair scenario shows S as a clear positive/negative bipolar pattern between transmitter and receiver.
+- **Session output**: Single coherent volume-render path serving both signed and positive scalars; replaces slice-as-primary-3D-view.
 
-### 6.2 — Streamlines
-- **Context:** `src/simulation/diagnostics.rs` (DerivedFields for E, B vector data), `src/simulation/grid.rs` (trilinear interpolation needed), `ARCHITECTURE.md §Visualization Modes` (lines 397–400, streamline description)
+### 6.2 — RK4 streamlines (primary vector view)
+- **Context:** `src/simulation/diagnostics.rs` (DerivedFields for E, B vector data), `src/simulation/grid.rs` (trilinear interpolation), `src/simulation/particles.rs` (the existing trilinear E/B sampler at world position is the right reference), `ARCHITECTURE.md §Visualization Architecture / Design principle` (vectors → streamlines)
 - **Depends on:** 1.3
-- `[~]` Implement `src/visualization/streamlines.rs`:
-  - **Note:** Uses Euler integration (1st-order), not RK4. Functional for visualization; upgrade to RK4 if field-line accuracy matters.
-  - `StreamlineConfig`: seed points, field to trace, integration steps, step size
-  - `fn compute_streamlines(derived_fields, config) -> Vec<Vec<Vec3>>`:
-    - From each seed point, integrate using 4th-order Runge-Kutta
-    - `// PSEUDOCODE: RK4 streamline integration:`
-    - `// p = seed_point`
-    - `// for step in 0..max_steps:`
-    - `//   k1 = field_at(p) * h`
-    - `//   k2 = field_at(p + k1/2) * h`
-    - `//   k3 = field_at(p + k2/2) * h`
-    - `//   k4 = field_at(p + k3) * h`
-    - `//   p_new = p + (k1 + 2*k2 + 2*k3 + k4) / 6`
-    - `//   append p_new to streamline`
-    - `//   stop if |field_at(p_new)| < threshold or p_new outside grid`
-    - Uses trilinear interpolation of field values between grid points
-  - Render streamlines as polyline meshes, colored by field magnitude
-  - Optional: animated particles moving along streamlines
-- `[ ]` Add streamline controls to UI: field selector, seed placement, density
-- `[ ]` Verify: dipole scenario shows classic dipole field line pattern
-- **Session output**: Electric and magnetic field lines in 3D
+- **Goal:** become the primary 3D representation of every vector field (E, B, Poynting, A). Glyphs are demoted to a sparse overlay at most, or deleted in favour of streamlines.
+- `[x]` Implement `src/visualization/streamlines.rs` (full rewrite from the Euler stub):
+  - `compute_streamline(grid, diag, field, seed_xyz, max_steps, step_fraction, threshold) -> Vec<(Vec3, f32)>` — pure function returning a polyline of (world_pos, magnitude) pairs. Each point's magnitude is the field magnitude at the start of the segment terminating there, used by the renderer for per-segment colouring.
+  - `rk4_step(grid, diag, field, fx, fy, fz, h)` — single 4th-order Runge-Kutta step on the NORMALISED direction. Step length is arc length (h·dx grid units) regardless of magnitude, which is the right thing for visualising topology. Returns `None` if any of k1..k4 falls outside the safe interpolation region or hits zero magnitude.
+  - `polyline_at(polyline, t)` helper for interpolating a position at fractional parameter t ∈ [0, 1] along the polyline — used by the tracer animation.
+  - `draw_streamlines` Bevy system: traces from a stride-spaced seed grid, draws each polyline as gizmo lines coloured by per-segment magnitude, and (when enabled) draws `tracers_per_line` animated white sphere markers flowing along each line at `tracer_speed` revolutions/second.
+- `[x]` Add streamline controls to UI — `Streamlines` window (`ui_streamline_panel` in `src/ui/plugin.rs`): enable toggle, vector-field selector, seed stride / max steps / step fraction sliders, colour map + auto/manual range, animate-tracers toggle with tracers-per-line and tracer-speed sliders.
+- Wired into `UiPlugin`'s system list — previously `StreamlineConfig` was a registered resource with no panel, so streamlines were silently disabled the entire time.
+- `[x]` Tests in `src/visualization/streamlines.rs`:
+  - `test_streamline_uniform_field_is_straight_line` — uniform +ẑ E-field: streamline is a vertical straight line, X/Y drift < 1e-5, Z monotone, step length = step_fraction × dx within 1e-4 rel. err.
+  - `test_streamline_vortex_closes_on_itself` — vortex field E = (-y, x, 0) in grid coords: streamline of radius 4 grid units closes after one full revolution within tolerance derived from the geometric residual (round(2π·r/h) is rarely 2π·r/h exactly) plus 5 % RK4 phase drift; radius drift along the orbit < 2 %.
+  - `test_streamline_outside_region_returns_only_seed` — seed near a face: integrator immediately exits the safe region, polyline contains only the seed.
+  - `test_polyline_at_endpoints` and `test_polyline_at_too_short` cover the tracer-position helper.
+- **Session output**: RK4 streamlines as the primary vector visualisation, with animated tracers conveying direction at a glance. Glyphs survive only as a sparse-overlay tool; streamlines are the default.
 
 ### 6.3 — Isosurface extraction
 - **Context:** `src/simulation/diagnostics.rs` (DerivedFields scalar data), `src/simulation/grid.rs` (grid dimensions for cell iteration)

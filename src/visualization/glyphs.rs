@@ -96,14 +96,23 @@ pub struct GlyphConfig {
     pub field: GlyphField,
     /// Sample every Nth cell along each axis.
     pub stride: u32,
-    /// Scale factor for arrow length (world units per field unit).
+    /// Length of an arrow at the auto-range reference magnitude, in units of
+    /// `grid.dx` (cell widths). With `scale = 0.5` an arrow at the 95th-
+    /// percentile magnitude is half a cell long; rare outliers grow
+    /// proportionally larger but stay bounded relative to the grid.
     pub scale: f32,
     /// Color encoding mode.
     pub color_encoding: ColorEncoding,
     /// Color map used when encoding is Standard.
     pub color_map: ColorMap,
-    /// Auto-range for color mapping.
+    /// Auto-range for color mapping AND length normalization. Uses the
+    /// `auto_range_percentile`-th percentile rather than the max so a single
+    /// source-cell outlier doesn't squash every other arrow into invisibility.
     pub auto_range: bool,
+    /// Percentile (0..1) used as the auto-range reference. Default 0.95
+    /// keeps 95% of the field amplitude in the readable range and clips the
+    /// top 5% (typically near sources) to a uniform "saturated" bin.
+    pub auto_range_percentile: f32,
     pub manual_min: f32,
     pub manual_max: f32,
     /// RGB multi-field config.
@@ -120,10 +129,12 @@ impl Default for GlyphConfig {
             enabled: false,
             field: GlyphField::Electric,
             stride: 4,
-            scale: 0.001,
+            // dx-relative: 0.5 cells at the percentile reference.
+            scale: 0.5,
             color_encoding: ColorEncoding::Standard,
             color_map: ColorMap::Viridis,
             auto_range: true,
+            auto_range_percentile: 0.95,
             manual_min: 0.0,
             manual_max: 1.0,
             rgb_config: GlyphRgbConfig::default(),
@@ -131,6 +142,22 @@ impl Default for GlyphConfig {
             size_color_config: GlyphSizeColorConfig::default(),
         }
     }
+}
+
+/// Compute the `p`-th percentile (0..1) of a slice of magnitudes.
+///
+/// Sorts a copy of the input and returns the value at the percentile index.
+/// Returns 0.0 for empty input. Used by the auto-range path so that strong
+/// near-source spikes don't compress the rest of the field into invisibility.
+pub fn percentile_of(values: &[f32], p: f32) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut v: Vec<f32> = values.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p = p.clamp(0.0, 1.0);
+    let idx = ((p * (v.len() - 1) as f32).round() as usize).min(v.len() - 1);
+    v[idx]
 }
 
 /// Sample the selected vector field at a given flat grid index.
@@ -223,12 +250,15 @@ pub fn draw_glyph_arrows(
         }
     }
 
+    // Auto-range uses the configurable percentile (default 95th) of the
+    // sample magnitudes, NOT the absolute max. With `max_mag = max(samples)`
+    // a single near-source outlier (where |E| is orders of magnitude above
+    // the rest of the field) compresses every other arrow below the visibility
+    // threshold and the visualization looks empty. Percentile clipping keeps
+    // the bulk of the field readable while letting strong spots saturate.
     let max_mag = if config.auto_range {
-        samples
-            .iter()
-            .map(|&(_, _, _, _, _, m)| m)
-            .fold(0.0f32, f32::max)
-            .max(1e-6)
+        let mags: Vec<f32> = samples.iter().map(|&(_, _, _, _, _, m)| m).collect();
+        percentile_of(&mags, config.auto_range_percentile).max(1e-6)
     } else {
         config.manual_max.max(1e-6)
     };
@@ -237,6 +267,40 @@ pub fn draw_glyph_arrows(
     } else {
         config.manual_min
     };
+
+    // For RgbMultiField and SizeColor we encode SCALAR fields whose magnitudes
+    // are unrelated to the vector-field max. Reusing `max_mag` (a vector
+    // magnitude) for these scalars caused channels to saturate or go black —
+    // a real correctness bug. Compute per-channel percentile maxes from the
+    // same sample set, lazily, only for the encodings that need them.
+    let scalar_p95 = |field: FieldQuantity| -> f32 {
+        let vals: Vec<f32> = samples
+            .iter()
+            .map(|&(_, _, _, idx, _, _)| sample_scalar_at(&grid, &diag, idx, field).abs())
+            .collect();
+        percentile_of(&vals, config.auto_range_percentile).max(1e-6)
+    };
+    let (r_max, g_max, b_max) = match config.color_encoding {
+        ColorEncoding::RgbMultiField => (
+            scalar_p95(config.rgb_config.r_field),
+            scalar_p95(config.rgb_config.g_field),
+            scalar_p95(config.rgb_config.b_field),
+        ),
+        _ => (1.0, 1.0, 1.0),
+    };
+    let (size_max, color_max) = match config.color_encoding {
+        ColorEncoding::SizeColor => (
+            scalar_p95(config.size_color_config.size_field),
+            scalar_p95(config.size_color_config.color_field),
+        ),
+        _ => (1.0, 1.0),
+    };
+
+    // Arrow lengths are normalised to grid.dx so the visualization is unit-
+    // agnostic: `config.scale` directly means "cell widths at the reference
+    // magnitude". An arrow at the percentile reference is `scale * dx` long;
+    // rare outliers grow proportionally larger.
+    let target_unit = grid.dx * config.scale;
 
     // Second pass: draw arrows
     for &(x, y, z, idx, vec, mag) in &samples {
@@ -249,22 +313,22 @@ pub fn draw_glyph_arrows(
 
         let (arrow_length, color) = match config.color_encoding {
             ColorEncoding::Standard => {
-                let length = mag * config.scale;
+                let length = (mag / max_mag) * target_unit;
                 let rgba = color_maps::map_value(mag, min_mag, max_mag, config.color_map);
                 (length, Color::srgba(rgba[0], rgba[1], rgba[2], rgba[3]))
             }
             ColorEncoding::RgbMultiField => {
-                let length = mag * config.scale;
+                let length = (mag / max_mag) * target_unit;
                 let r_val = sample_scalar_at(&grid, &diag, idx, config.rgb_config.r_field);
                 let g_val = sample_scalar_at(&grid, &diag, idx, config.rgb_config.g_field);
                 let b_val = sample_scalar_at(&grid, &diag, idx, config.rgb_config.b_field);
                 let rgba = color_maps::encode_rgb_multi(
-                    r_val, 0.0, max_mag, g_val, 0.0, max_mag, b_val, 0.0, max_mag,
+                    r_val, 0.0, r_max, g_val, 0.0, g_max, b_val, 0.0, b_max,
                 );
                 (length, Color::srgba(rgba[0], rgba[1], rgba[2], rgba[3]))
             }
             ColorEncoding::HsvPhase => {
-                let length = mag * config.scale;
+                let length = (mag / max_mag) * target_unit;
                 let rgba =
                     color_maps::encode_hsv_phase(vec, config.hsv_config.plane, max_mag);
                 (length, Color::srgba(rgba[0], rgba[1], rgba[2], rgba[3]))
@@ -278,11 +342,11 @@ pub fn draw_glyph_arrows(
                     idx,
                     config.size_color_config.color_field,
                 );
-                let length = size_val.abs() * config.scale;
+                let length = (size_val.abs() / size_max) * target_unit;
                 let rgba = color_maps::map_value(
                     color_val.abs(),
                     0.0,
-                    max_mag,
+                    color_max,
                     config.size_color_config.color_map,
                 );
                 (length, Color::srgba(rgba[0], rgba[1], rgba[2], rgba[3]))
@@ -307,5 +371,43 @@ pub fn draw_glyph_arrows(
         };
         gizmos.line(end, end - dir * head_len + perp * head_len * 0.3, color);
         gizmos.line(end, end - dir * head_len - perp * head_len * 0.3, color);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_percentile_of_basic() {
+        let v: Vec<f32> = (1..=100).map(|i| i as f32).collect();
+        // 50th percentile of 1..=100 (101 values? no, 100 values) is the
+        // value at idx = round(0.5 * 99) = 50, i.e. v[50] = 51.0.
+        assert!((percentile_of(&v, 0.5) - 51.0).abs() < 0.5);
+        // 95th percentile: idx = round(0.95 * 99) = 94, v[94] = 95.0.
+        assert!((percentile_of(&v, 0.95) - 95.0).abs() < 0.5);
+        // 100th percentile = max = 100.0.
+        assert_eq!(percentile_of(&v, 1.0), 100.0);
+        // 0th percentile = min = 1.0.
+        assert_eq!(percentile_of(&v, 0.0), 1.0);
+    }
+
+    #[test]
+    fn test_percentile_of_empty_returns_zero() {
+        assert_eq!(percentile_of(&[], 0.95), 0.0);
+    }
+
+    #[test]
+    fn test_percentile_clipping_suppresses_outlier() {
+        // 99 small values and 1 huge spike (mimics a near-source cell next
+        // to a sea of bulk-radiation cells in the dipole scenario).
+        let mut v: Vec<f32> = vec![1.0; 99];
+        v.push(1.0e6);
+        // The simple max would give 1e6, dominating the auto-range.
+        let max = v.iter().cloned().fold(0.0f32, f32::max);
+        assert_eq!(max, 1.0e6);
+        // The 95th percentile sits in the bulk → 1.0, not the spike.
+        let p95 = percentile_of(&v, 0.95);
+        assert!(p95 < 10.0, "p95 should be bulk, got {p95}");
     }
 }
