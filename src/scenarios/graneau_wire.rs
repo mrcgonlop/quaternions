@@ -126,6 +126,106 @@ pub fn apply_graneau_wire_default(
     );
 }
 
+/// Default y-spacing between the two parallel strands of the hairpin
+/// (world meters). 5 mm is a "thick" PCB spacing, easy to resolve.
+pub const DEFAULT_HAIRPIN_SPACING: f32 = 0.005;
+
+/// Apply the hairpin PCB-trace scenario.
+///
+/// Two parallel rows of (ion, electron) pairs along x̂, separated in y by
+/// `pcb_spacing`. The TOP row at y = +s/2 carries current in +x̂ (electrons
+/// drift +v); the BOTTOM row at y = −s/2 carries current in −x̂ (electrons
+/// drift −v). This is the canonical PCB-trace geometry where a current
+/// doubles back on itself — the same single conductor folded into two
+/// parallel strands.
+///
+/// In standard Lorentz/Biot-Savart electrodynamics the antiparallel currents
+/// repel each other transversely (Ampere's law for parallel currents), but
+/// neither strand experiences any LONGITUDINAL force from the other. Weber
+/// theory predicts a longitudinal contribution from the inter-strand
+/// pairwise interactions whose pattern differs from the single-wire Graneau
+/// profile — that's the test signature.
+///
+/// Particle ordering is (top_ion[0], top_e[0], …, top_ion[N−1], top_e[N−1],
+/// bot_ion[0], bot_e[0], …, bot_ion[N−1], bot_e[N−1]). Top row first.
+pub fn apply_hairpin_scenario(
+    particles: &mut ParticleSystem,
+    force_mode: &mut ForceMode,
+    num_segments: usize,
+    segment_spacing: f32,
+    pcb_spacing: f32,
+    v_drift: f32,
+) {
+    particles.clear();
+    let half_length = (num_segments.saturating_sub(1)) as f32 * segment_spacing * 0.5;
+    let half_y = pcb_spacing * 0.5;
+
+    // Top strand: y = +s/2, electrons drift in +x̂.
+    for i in 0..num_segments {
+        let x = i as f32 * segment_spacing - half_length;
+        let pos = [x, half_y, 0.0];
+        particles.push(ParticleState::new(SEGMENT_CHARGE, ION_MASS, pos, [0.0; 3]));
+        particles.push(ParticleState::new(
+            -SEGMENT_CHARGE,
+            ELECTRON_MASS,
+            pos,
+            [v_drift, 0.0, 0.0],
+        ));
+    }
+    // Bottom strand: y = −s/2, electrons drift in −x̂ (return current).
+    for i in 0..num_segments {
+        let x = i as f32 * segment_spacing - half_length;
+        let pos = [x, -half_y, 0.0];
+        particles.push(ParticleState::new(SEGMENT_CHARGE, ION_MASS, pos, [0.0; 3]));
+        particles.push(ParticleState::new(
+            -SEGMENT_CHARGE,
+            ELECTRON_MASS,
+            pos,
+            [-v_drift, 0.0, 0.0],
+        ));
+    }
+
+    *force_mode = ForceMode::Weber;
+}
+
+/// Apply the hairpin scenario with default geometry parameters.
+pub fn apply_hairpin_default(
+    particles: &mut ParticleSystem,
+    force_mode: &mut ForceMode,
+) {
+    apply_hairpin_scenario(
+        particles,
+        force_mode,
+        DEFAULT_NUM_SEGMENTS,
+        DEFAULT_SEGMENT_SPACING,
+        DEFAULT_HAIRPIN_SPACING,
+        DEFAULT_DRIFT_VELOCITY,
+    );
+}
+
+/// Compute the per-ion axial Weber force on the TOP strand of a hairpin.
+///
+/// Returns `(x_position, F_x)` for each top-strand ion (the even-indexed
+/// particles in the first half of the array per the ordering documented in
+/// `apply_hairpin_scenario`). The bottom strand's contribution is included
+/// in the pair sum — it's what makes this profile differ from the single-
+/// strand `compute_wire_force_profile`.
+pub fn compute_hairpin_top_force_profile(
+    particles: &ParticleSystem,
+    num_segments: usize,
+) -> Vec<(f32, f32)> {
+    let forces = compute_weber_forces(&particles.particles, SimParams::C0);
+    let n = num_segments;
+    let mut profile = Vec::with_capacity(n);
+    for i in 0..n {
+        let ion_idx = 2 * i; // top-strand ions are at indices 0, 2, …, 2(N−1)
+        if let Some(p) = particles.particles.get(ion_idx) {
+            profile.push((p.position[0], forces[ion_idx][0]));
+        }
+    }
+    profile
+}
+
 /// Compute the per-ion axial Weber force along the wire.
 ///
 /// Returns a Vec of `(x_position, F_x)` pairs, one entry per ion (the
@@ -312,5 +412,115 @@ mod tests {
                 "x = {x:.3e}: Coulomb-only force should vanish on neutral chain, got F = {f:.3e}"
             );
         }
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 7.3 — Hairpin PCB-trace geometry
+    // ----------------------------------------------------------------------
+
+    /// Hairpin setup creates 4 N particles in two strands, total charge zero,
+    /// top electrons drift +x̂, bottom electrons drift −x̂.
+    #[test]
+    fn test_apply_hairpin_creates_two_strands() {
+        let mut particles = ParticleSystem::default();
+        let mut force_mode = ForceMode::Lorentz;
+        apply_hairpin_default(&mut particles, &mut force_mode);
+
+        assert_eq!(force_mode, ForceMode::Weber);
+        assert_eq!(
+            particles.particles.len(),
+            2 * particle_count(DEFAULT_NUM_SEGMENTS)
+        );
+
+        // Charge neutrality.
+        let total: f32 = particles.particles.iter().map(|p| p.charge).sum();
+        assert!(total.abs() < 1e-6);
+
+        // Top strand (first 2N entries): y = +s/2, electrons +x̂.
+        let half_y = DEFAULT_HAIRPIN_SPACING * 0.5;
+        for i in 0..DEFAULT_NUM_SEGMENTS {
+            let ion = &particles.particles[2 * i];
+            let electron = &particles.particles[2 * i + 1];
+            assert!((ion.position[1] - half_y).abs() < 1e-7);
+            assert_eq!(ion.velocity, [0.0; 3]);
+            assert!(electron.velocity[0] > 0.0, "top electron should drift +x");
+        }
+        // Bottom strand (next 2N entries): y = −s/2, electrons −x̂.
+        let bot_start = 2 * DEFAULT_NUM_SEGMENTS;
+        for i in 0..DEFAULT_NUM_SEGMENTS {
+            let ion = &particles.particles[bot_start + 2 * i];
+            let electron = &particles.particles[bot_start + 2 * i + 1];
+            assert!((ion.position[1] - (-half_y)).abs() < 1e-7);
+            assert_eq!(ion.velocity, [0.0; 3]);
+            assert!(electron.velocity[0] < 0.0, "bottom electron should drift −x");
+        }
+    }
+
+    /// The hairpin top-strand profile is **NOT identical** to the single-
+    /// strand Graneau profile — adding the bottom return-current strand
+    /// modifies the longitudinal Weber force on each top-strand ion. This
+    /// test asserts that there is a measurable difference, demonstrating
+    /// that the bottom strand contributes non-trivially.
+    #[test]
+    fn test_hairpin_profile_differs_from_straight_wire() {
+        // Single straight wire (top strand only).
+        let mut p_straight = ParticleSystem::default();
+        let mut fm = ForceMode::Lorentz;
+        apply_graneau_wire_default(&mut p_straight, &mut fm);
+        let straight_profile = compute_wire_force_profile(&p_straight);
+
+        // Hairpin (top + bottom strands).
+        let mut p_hair = ParticleSystem::default();
+        apply_hairpin_default(&mut p_hair, &mut fm);
+        let hair_profile = compute_hairpin_top_force_profile(&p_hair, DEFAULT_NUM_SEGMENTS);
+
+        assert_eq!(straight_profile.len(), hair_profile.len());
+
+        // Per-ion difference. The hairpin's bottom strand modifies the top-
+        // strand's Weber profile by inter-strand Coulomb + Weber-correction
+        // contributions. We expect a measurable difference at every ion.
+        let mut max_abs_diff = 0.0f32;
+        let mut max_straight = 0.0f32;
+        for (s, h) in straight_profile.iter().zip(hair_profile.iter()) {
+            let diff = (s.1 - h.1).abs();
+            max_abs_diff = max_abs_diff.max(diff);
+            max_straight = max_straight.max(s.1.abs());
+        }
+        // The inter-strand correction is small (it's a v²/c² · geometric-
+        // factor effect), but should be cleanly above the noise floor of
+        // the f32 Weber sum on this geometry.
+        assert!(
+            max_abs_diff > 1e-2 * max_straight,
+            "Hairpin should measurably alter the longitudinal force profile; \
+             max |Δ| = {max_abs_diff:.3e}, max |F_straight| = {max_straight:.3e} \
+             (ratio = {:.3e})",
+            max_abs_diff / max_straight.max(1e-30)
+        );
+    }
+
+    /// Top-strand ions in a hairpin still get end-peaked outward forces,
+    /// because the SELF-interaction (top-strand against itself) dominates.
+    /// The bottom strand modifies but does not erase the Graneau pattern.
+    #[test]
+    fn test_hairpin_top_strand_still_end_peaked() {
+        let mut particles = ParticleSystem::default();
+        let mut fm = ForceMode::Lorentz;
+        apply_hairpin_default(&mut particles, &mut fm);
+        let profile = compute_hairpin_top_force_profile(&particles, DEFAULT_NUM_SEGMENTS);
+        let n = profile.len();
+        let f_left = profile[0].1;
+        let f_right = profile[n - 1].1;
+        let f_middle = profile[n / 2].1;
+        let f_end = f_left.abs().max(f_right.abs());
+
+        assert!(f_left < 0.0, "leftmost top-strand ion should still feel −x push: {f_left:.3e}");
+        assert!(f_right > 0.0, "rightmost top-strand ion should still feel +x push: {f_right:.3e}");
+        // Middle is much smaller than ends — the bottom-strand correction
+        // is small relative to the self-strand end-peak.
+        assert!(
+            f_middle.abs() < 0.1 * f_end,
+            "middle top-strand ion: |F| = {:.3e}, end |F| = {f_end:.3e}",
+            f_middle.abs()
+        );
     }
 }

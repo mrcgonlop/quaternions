@@ -4,9 +4,14 @@ use bevy::prelude::*;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
+use crate::scenarios::aharonov_bohm;
 use crate::scenarios::bifilar_coil;
 use crate::scenarios::dipole_radiation::{self, Scenario};
 use crate::scenarios::graneau_wire;
+use crate::scenarios::hopfion_ball_lightning;
+use crate::scenarios::k_cycle_resonator;
+use crate::scenarios::spheromak_taylor;
+use crate::scenarios::toroidal_ab;
 use crate::scenarios::vacuum_k;
 use crate::simulation::diagnostics::{
     probe_fft, DiagnosticsState, Probe, ProbeField, ProbeSet,
@@ -313,6 +318,124 @@ fn ui_side_panel(
                                             &mut force_mode,
                                         );
                                         config.extended_mode = false;
+                                        config.paused = true;
+                                    }
+                                    Scenario::AharonovBohm => {
+                                        // Static analytic solenoid potential
+                                        // — the AB structure (A ≠ 0 where B
+                                        // = 0) shows up immediately, no need
+                                        // to step the simulation.
+                                        let ab_cfg = aharonov_bohm::AbConfig {
+                                            axis_xy_cells: [
+                                                grid.nx as f32 * 0.5 - 0.5,
+                                                grid.ny as f32 * 0.5 - 0.5,
+                                            ],
+                                            ..Default::default()
+                                        };
+                                        aharonov_bohm::apply_ab_scenario(
+                                            grid,
+                                            &mut sources,
+                                            &ab_cfg,
+                                        );
+                                        if let Some(ref mut pml_state) = pml {
+                                            pml_state.reset_psi();
+                                        }
+                                        config.paused = true;
+                                    }
+                                    Scenario::ToroidalAb => {
+                                        // Discrete-Biot-Savart torus: B inside
+                                        // the donut tube, A extending through
+                                        // the torus hole. Setup is O(seconds)
+                                        // for default 32³ grid + 16 loops × 32
+                                        // segments — runs once on scenario
+                                        // load.
+                                        let cfg = toroidal_ab::ToroidalConfig::default();
+                                        toroidal_ab::apply_toroidal_ab_scenario(
+                                            grid,
+                                            &mut sources,
+                                            &cfg,
+                                        );
+                                        if let Some(ref mut pml_state) = pml {
+                                            pml_state.reset_psi();
+                                        }
+                                        config.paused = true;
+                                    }
+                                    Scenario::HairpinTrace => {
+                                        // PCB hairpin: two parallel anti-
+                                        // parallel current strands. Pure
+                                        // particle-Weber scenario, no field
+                                        // sources or PML transients.
+                                        grid.reset();
+                                        sources.sources.clear();
+                                        if let Some(ref mut pml_state) = pml {
+                                            pml_state.reset_psi();
+                                        }
+                                        graneau_wire::apply_hairpin_default(
+                                            &mut particle_system,
+                                            &mut force_mode,
+                                        );
+                                        config.extended_mode = false;
+                                        config.paused = true;
+                                    }
+                                    Scenario::Hopfion => {
+                                        // Hedgehog Skyrmion initial Q field
+                                        // — a topologically nontrivial
+                                        // configuration that under the
+                                        // linear wave equation disperses
+                                        // rapidly. Best viewed in extended
+                                        // mode where K-coupling can in
+                                        // principle stabilise the topology.
+                                        let cfg =
+                                            hopfion_ball_lightning::HopfionConfig::default();
+                                        hopfion_ball_lightning::apply_hopfion_scenario(
+                                            grid,
+                                            &mut sources,
+                                            &cfg,
+                                        );
+                                        if let Some(ref mut pml_state) = pml {
+                                            pml_state.reset_psi();
+                                        }
+                                        config.extended_mode = true;
+                                        config.paused = true;
+                                    }
+                                    Scenario::KCycleResonator => {
+                                        // K-equation drive in a spherical
+                                        // shell. Configures VacuumConfig
+                                        // (enables K dynamics + drive),
+                                        // installs inside/outside probes for
+                                        // FFT-based resonance detection,
+                                        // pauses for the user to step
+                                        // through the drive cycle.
+                                        k_cycle_resonator::apply_k_cycle_resonator_default(
+                                            grid,
+                                            &mut sources,
+                                            &mut vacuum_config,
+                                            &mut probes,
+                                        );
+                                        if let Some(ref mut pml_state) = pml {
+                                            pml_state.reset_psi();
+                                        }
+                                        config.extended_mode = true;
+                                        config.paused = true;
+                                    }
+                                    Scenario::SpheromakTaylor => {
+                                        // Chandrasekhar-Kendall IC inside
+                                        // a sphere — linked poloidal /
+                                        // toroidal flux. The diagnostics
+                                        // panel's H_mag readout now
+                                        // displays the magnetic-helicity
+                                        // integral; watch how it evolves.
+                                        let cfg =
+                                            spheromak_taylor::SpheromakConfig::default();
+                                        spheromak_taylor::apply_spheromak_scenario(
+                                            grid,
+                                            &mut sources,
+                                            &cfg,
+                                        );
+                                        if let Some(ref mut pml_state) = pml {
+                                            pml_state.reset_psi();
+                                        }
+                                        config.extended_mode = true;
                                         config.paused = true;
                                     }
                                 }

@@ -302,6 +302,30 @@ pub enum Scenario {
     /// Graneau wire: chain of charged segments revealing Weber's longitudinal
     /// force on a straight current-carrying wire. Forces Weber mode.
     GraneauWire,
+    /// Aharonov-Bohm: solenoid with B confined inside, A extending outside.
+    /// Demonstrates A ≠ 0 where B = 0 and that ∮A·dl quantises to the flux.
+    AharonovBohm,
+    /// Toroidal AB: macro-scale donut coil with B confined inside the tube,
+    /// A reaching through the torus hole. ∮A·dl on a pickup loop linking
+    /// the tube quantises to the enclosed flux.
+    ToroidalAb,
+    /// Hairpin PCB trace: two parallel antiparallel current strands.
+    /// Bottom strand modifies the top strand's Weber longitudinal profile.
+    HairpinTrace,
+    /// Hopfion / ball lightning: hedgehog Skyrmion ansatz with non-trivial
+    /// topological charge. Tests whether the (Q, K) coupled system can
+    /// sustain the topological structure against the linear wave equation's
+    /// natural dispersion tendency.
+    Hopfion,
+    /// K-cycle resonator: drives the K equation sinusoidally inside a
+    /// spherical shell to test for parametric coupling between K
+    /// oscillation and EM-mode amplification at 2·ω_drive.
+    KCycleResonator,
+    /// Spheromak-like Chandrasekhar-Kendall IC: A = j_1(λr)·Y_lm-derived
+    /// vector potential confined to a sphere. Verifies the new
+    /// `compute_magnetic_helicity` diagnostic on a configuration with
+    /// nontrivial flux linkage.
+    SpheromakTaylor,
 }
 
 impl Scenario {
@@ -311,6 +335,12 @@ impl Scenario {
         Scenario::BifilarCoil,
         Scenario::BifilarPair,
         Scenario::GraneauWire,
+        Scenario::AharonovBohm,
+        Scenario::ToroidalAb,
+        Scenario::HairpinTrace,
+        Scenario::Hopfion,
+        Scenario::KCycleResonator,
+        Scenario::SpheromakTaylor,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -320,6 +350,12 @@ impl Scenario {
             Scenario::BifilarCoil => "Bifilar Coil (Scalar Wave)",
             Scenario::BifilarPair => "Bifilar Pair (Tx/Rx)",
             Scenario::GraneauWire => "Graneau Wire (Weber Longitudinal)",
+            Scenario::AharonovBohm => "Aharonov-Bohm (Solenoid)",
+            Scenario::ToroidalAb => "Toroidal AB (Donut Coil)",
+            Scenario::HairpinTrace => "Hairpin PCB (Antiparallel Currents)",
+            Scenario::Hopfion => "Hopfion / Ball Lightning (Skyrmion)",
+            Scenario::KCycleResonator => "K-cycle Resonator",
+            Scenario::SpheromakTaylor => "Spheromak (Chandrasekhar-Kendall)",
         }
     }
 }

@@ -328,18 +328,39 @@ pub fn step_field_cpu(
                 }
                 // --- K leapfrog (vacuum polarizability) ---
                 //
-                // ∂²K/∂t² = c_local² ∇²K − ωₚ²(K−1) + η · u_field / u_s
+                // ∂²K/∂t² = c_local² ∇²K − ωₚ²(K−1) + η · u_field / u_s + drive(t, r)
                 // Störmer-Verlet: k_dot += k_ddot * dt; k = max(k + k_dot * dt, 1.0)
                 //
                 // PML cells are excluded: K dynamics inside the PML would
                 // undermine CPML absorption (same reason as S coupling exclusion).
+                //
+                // Phase 7.6 drive term: when `vacuum.k_drive_amplitude > 0`
+                // and the cell sits within `vacuum.k_drive_radius` of the
+                // grid centre, an external sinusoidal forcing is added to
+                // k_ddot. This models the "rapidly-switched K" of the
+                // K-cycle resonator scenario. Default amplitude is zero, so
+                // existing scenarios see identical behaviour.
                 if k_enabled && !is_pml_cell {
                     let v = vacuum.unwrap(); // safe: k_enabled implies vacuum is Some
                     let omega_p_sq = v.omega_p * v.omega_p;
                     let u_s = if v.u_s > 0.0 { v.u_s } else { 1.0 };
-                    let k_ddot = c_local_sq * lap_k[i]
+                    let mut k_ddot = c_local_sq * lap_k[i]
                         - omega_p_sq * (cell.k - 1.0)
                         + v.eta * u_field_k[i] / u_s;
+
+                    if v.k_drive_amplitude > 0.0 && v.k_drive_radius > 0.0 {
+                        // World-space cell-centre position relative to grid origin.
+                        let cx = (x as f32 + 0.5) * dx - nx as f32 * dx * 0.5;
+                        let cy = (y as f32 + 0.5) * dx - ny as f32 * dx * 0.5;
+                        let cz = (z as f32 + 0.5) * dx - nz as f32 * dx * 0.5;
+                        let r_sq = cx * cx + cy * cy + cz * cz;
+                        let r_drive_sq = v.k_drive_radius * v.k_drive_radius;
+                        if r_sq <= r_drive_sq {
+                            let omega = 2.0 * std::f32::consts::PI * v.k_drive_frequency;
+                            k_ddot += v.k_drive_amplitude * (omega * params.time).sin();
+                        }
+                    }
+
                     out.k_dot = cell.k_dot + k_ddot * dt;
                     out.k = (cell.k + out.k_dot * dt).max(1.0);
                 } else {

@@ -51,6 +51,13 @@ pub struct DiagnosticsState {
     /// Topological charge (Baryon number / Skyrmion winding number).
     /// Integer for true topological configurations; near-zero for trivial fields.
     pub topological_charge: f32,
+
+    /// Magnetic helicity H_mag = ∫ A · B dV over interior non-PML cells.
+    /// Conserved exactly in ideal MHD; conserved to numerical precision in
+    /// our standard-mode evolution. In extended QVED with sources, the S
+    /// field can inject or drain helicity — the drift rate of this quantity
+    /// is the diagnostic for that.
+    pub magnetic_helicity: f32,
 }
 
 /// Compute derived electromagnetic fields from the current grid state.
@@ -346,6 +353,51 @@ pub fn compute_topological_charge(grid: &SimulationGrid) -> f32 {
     charge as f32
 }
 
+/// Compute the magnetic helicity H_mag = ∫ A · B dV.
+///
+/// Defined for the vector potential A (= q[1..4]) and the magnetic field B
+/// (already computed in `derived[i].b`). Helicity measures the linkage of
+/// magnetic field lines: zero for unknotted poloidal-only or toroidal-only
+/// configurations, nonzero when poloidal and toroidal fields are coupled
+/// (e.g., a spheromak).
+///
+/// In ideal MHD, helicity is exactly conserved (Woltjer's theorem). In our
+/// standard-mode FDTD it should be conserved to numerical precision; in
+/// extended QVED mode the S field can act as a helicity source/sink. The
+/// drift rate is the QVED prediction.
+///
+/// Iterates only over interior non-PML cells — PML auxiliary fields don't
+/// represent real magnetic structure. Returns the sum in code units of
+/// (A magnitude) × (B magnitude) × m³.
+pub fn compute_magnetic_helicity(
+    grid: &SimulationGrid,
+    derived: &[DerivedFields],
+) -> f32 {
+    let nx = grid.nx as usize;
+    let ny = grid.ny as usize;
+    let nz = grid.nz as usize;
+    let dx = grid.dx;
+    let cell_volume = dx * dx * dx;
+    let cells = grid.read_buf();
+
+    let mut h = 0.0f64;
+    for z in 1..(nz - 1) {
+        for y in 1..(ny - 1) {
+            for x in 1..(nx - 1) {
+                let i = fdtd::idx(x, y, z, nx, ny);
+                if (cells[i].flags & CellFlags::PML) != 0 {
+                    continue;
+                }
+                let a = [cells[i].q[1], cells[i].q[2], cells[i].q[3]];
+                let b = derived[i].b;
+                let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+                h += dot as f64 * cell_volume as f64;
+            }
+        }
+    }
+    h as f32
+}
+
 /// Bevy system: compute derived fields and diagnostics each frame.
 ///
 /// When PmlState is present, energy is computed excluding PML cells.
@@ -374,6 +426,7 @@ pub fn diagnostics_system(
     // Topological charge is expensive — throttle to every 10 steps
     if grid.iteration % 10 == 0 {
         diag.topological_charge = compute_topological_charge(&grid);
+        diag.magnetic_helicity = compute_magnetic_helicity(&grid, &fields);
     }
 
     diag.fields = fields;

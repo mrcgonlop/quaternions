@@ -19,6 +19,13 @@ use crate::simulation::weber::{self, ForceMode};
 ///   ∂²K/∂t² = c_local² ∇²K − ωₚ²(K − 1) + η · u_field / u_s
 /// where ωₚ is the vacuum plasma frequency, η is the QED coupling,
 /// and u_s is the characteristic energy normalization.
+///
+/// The K-cycle resonator scenario (Phase 7.6) adds an external sinusoidal
+/// drive term to the K-update inside a configurable spherical region —
+/// when `k_drive_amplitude > 0` and a cell sits within `k_drive_radius` of
+/// the grid centre, `k_drive_amplitude · sin(2π · k_drive_frequency · t)`
+/// is added to k_dot each step. Default zero amplitude leaves the existing
+/// K dynamics untouched.
 #[derive(Resource, Clone, Debug)]
 pub struct VacuumConfig {
     /// Master switch: set false to skip K update entirely (K stays constant).
@@ -31,6 +38,21 @@ pub struct VacuumConfig {
     /// Characteristic energy density normalization u_s = ε₀(mₑc²/e)².
     /// Prevents numerical overflow; default 1.0 means u_field is in code units.
     pub u_s: f32,
+    /// Phase 7.6: amplitude of an external sinusoidal forcing on the K
+    /// equation, applied inside the spherical drive region. Default 0.0
+    /// (no drive). When > 0 the K-cycle resonator scenario uses this to
+    /// model a rapidly switched EM source modulating the local refractive
+    /// index. Drive frequency is `k_drive_frequency`.
+    pub k_drive_amplitude: f32,
+    /// Phase 7.6: drive frequency in code-units rad/(2π·s) (i.e., Hz). The
+    /// drive enters the K leapfrog as
+    ///   k_dot += k_drive_amplitude · sin(2π · k_drive_frequency · t)
+    /// for cells inside the drive region.
+    pub k_drive_frequency: f32,
+    /// Phase 7.6: spherical drive region radius in world meters, centred
+    /// on the grid origin. When 0, no drive is applied even if the
+    /// amplitude is nonzero.
+    pub k_drive_radius: f32,
 }
 
 impl Default for VacuumConfig {
@@ -40,6 +62,9 @@ impl Default for VacuumConfig {
             omega_p: 0.0,
             eta: 1e-4,
             u_s: 1.0,
+            k_drive_amplitude: 0.0,
+            k_drive_frequency: 0.0,
+            k_drive_radius: 0.0,
         }
     }
 }

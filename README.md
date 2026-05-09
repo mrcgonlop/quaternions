@@ -515,6 +515,43 @@ The physical status of this framework depends on the resolution of the gauge sym
 
 ---
 
+## Implementation Status
+
+A recurring question this README invites: "what does the simulator actually do today?" The catalog below documents the *physics targets*; this section documents how far down each target the implementation has reached. Status keys: ✅ implemented and tested · ⚠️ scenario implemented with deferred follow-on · 🚧 partial / pseudocode-only stub · ❌ not started.
+
+| Scenario / Capability | Status | Notes |
+|---|---|---|
+| Standard FDTD wave propagation | ✅ | 32³ default grid, CFL-bounded leapfrog, CPML and Mur ABC available |
+| Polarisable vacuum K-field | ✅ | Phase 1.8 K dynamics evolving via VacuumConfig |
+| Topological charge diagnostic | ✅ | Skyrmion / Baryon-number invariant, 1.9 |
+| Probe + FFT time-series | ✅ | Naive O(N²) DFT for FFT, ring-buffered probe history |
+| Dipole radiation | ✅ | Validates standard EM in the K=1, S=0 limit |
+| Bifilar coil + scalar wave | ✅ | Phase 2.3, demonstrates B-cancellation + S-mode excitation |
+| Bifilar pair (Tx/Rx) | ✅ | Phase 2.4, scalar-wave propagation delay measurement |
+| Vacuum K (polarisable demo) | ✅ | Phase 1.8 standalone scenario |
+| Graneau wire (longitudinal Weber) | ✅ | Phase 3.3, end-peaked profile |
+| Hairpin PCB trace | ✅ | Phase 7.3, antiparallel-strand modification verified |
+| Aharonov-Bohm (solenoid) | ✅ | Phase 7.1, A ≠ 0 where B = 0; QVED ↔ standard EM equivalence verified |
+| Toroidal AB (donut coil) | ✅ | Phase 7.2, linking flux ≈ NIr²/(2R); driven-AC mode deferred |
+| Hopfion / ball lightning | ⚠️ | Phase 7.5, hedgehog Skyrmion ansatz; full Rañada-Irvine IC and η-sweep deferred |
+| Brown / Biefeld asymmetric capacitor | 🚧 | Tier-3 stub with full pseudocode; needs conductor BC + Maxwell-stress integrator |
+| Pulsed-circuit scalar excitation | 🚧 | Tier-3 stub; needs switched-current source variant |
+| Charge cluster (EVO) stability | 🚧 | Tier-3 stub; needs seeded RNG + RMS-radius diagnostic |
+| K-cycle resonator | ❌ | Phase 7.6, needs K-equation drive in `step_field_cpu` |
+| Spheromak / Taylor with K | ❌ | Phase 7.7, needs `compute_magnetic_helicity` + Chandrasekhar-Kendall IC |
+| Casimir | ❌ | Phase 4.2, needs conductor BC + Maxwell-stress integrator |
+| Vacuum-modified wave propagation (lensing) | ❌ | Phase 4.3 |
+| GPU migration | ❌ | Phase 5; CPU baseline performant enough at 32³ |
+| Volume rendering (slabs) | ✅ | Phase 6.1 CPU prototype; GPU ray-march port deferred |
+| RK4 streamlines (primary vector view) | ✅ | Phase 6.2 |
+| Slice 2D inset | ✅ | Phase 6.0; 3D textured quad demoted, opt-in via `show_in_3d` |
+
+**Recurring caveat.** Verifications throughout use **code units** (μ₀ = 1, ε₀ = 1). The qualitative physics — flux quantisation, end-peaked Graneau profile, S ≠ 0 in extended mode, etc. — is preserved; absolute force / flux magnitudes are unphysical without scaling factors. See per-scenario module headers for scaling notes.
+
+**Verified equivalence claim (Phases 7.1, 7.2, 7.7).** For configurations with φ = 0 and ∇·A = 0 at t = 0 ("gauge-clean initial conditions"), QVED extended-mode evolution reduces to standard-mode evolution to floating-point precision. The QVED extension introduces no new physics for these configurations; the predictions diverge only when sources or initial conditions break gauge cleanliness.
+
+---
+
 ## Phenomena Catalog
 
 ### Tier 1 — Experimentally Established, Theoretically Robust (Simulation Self-Validation)
